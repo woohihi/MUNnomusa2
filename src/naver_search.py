@@ -1,6 +1,7 @@
 """
 네이버 검색 API 모듈
 Two-Track 검색 (VIP 기관 + 광역 키워드) 수행
+Updated: Real-time logging added
 """
 
 import requests
