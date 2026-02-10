@@ -93,6 +93,8 @@ class GeminiAnalyzer:
                 
             except Exception as e:
                 error_msg = str(e)
+                print(f"🐞 예외 타입: {type(e)}") # 디버깅용
+                print(f"📄 예외 메시지: {error_msg[:100]}...") # 메시지 앞부분 확인
                 # 429 Quota Exceeded 처리
                 if "429" in error_msg or "quota" in error_msg.lower() or "resource exhausted" in error_msg.lower():
                     if attempt < max_retries:
