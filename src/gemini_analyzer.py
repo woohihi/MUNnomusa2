@@ -67,29 +67,45 @@ class GeminiAnalyzer:
         # 프롬프트 생성
         prompt = self._build_prompt(title, description, is_empty_body)
         
-        try:
-            # API 호출
-            response = self.model.generate_content(prompt)
-            
-            # JSON 파싱
-            result = self._parse_response(response.text)
-            
-            # Rate Limiting
-            time.sleep(GEMINI_RATE_LIMIT_DELAY)
-            
-            # 적합하지 않으면 None 반환
-            if not result or not result.get('is_relevant'):
-                return None
-            
-            # URL 추가
-            result['url'] = url
-            result['original_title'] = title
-            
-            return result
-            
-        except Exception as e:
-            print(f"❌ Gemini 분석 실패: {e}")
-            return None
+        max_retries = 3
+        base_delay = 10  # 429 발생 시 기본 대기 시간 (초)
+
+        for attempt in range(max_retries + 1):
+            try:
+                # API 호출
+                response = self.model.generate_content(prompt)
+                
+                # JSON 파싱
+                result = self._parse_response(response.text)
+                
+                # Rate Limiting (성공 시 기본 딜레이)
+                time.sleep(GEMINI_RATE_LIMIT_DELAY)
+                
+                # 적합하지 않으면 None 반환
+                if not result or not result.get('is_relevant'):
+                    return None
+                
+                # URL 추가
+                result['url'] = url
+                result['original_title'] = title
+                
+                return result
+                
+            except Exception as e:
+                error_msg = str(e)
+                # 429 Quota Exceeded 처리
+                if "429" in error_msg or "quota" in error_msg.lower() or "resource exhausted" in error_msg.lower():
+                    if attempt < max_retries:
+                        wait_time = base_delay * (2 ** attempt)  # 10s, 20s, 40s
+                        print(f"⏳ Quota 초과 (429). {wait_time}초 후 재시도... ({attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ Gemini 분석 실패 (최대 재시도 초과): {e}")
+                        return None
+                else:
+                    print(f"❌ Gemini 분석 실패: {e}")
+                    return None
     
     def analyze_batch(self, items: List[Dict[str, Any]], callback=None) -> List[Dict[str, Any]]:
         """

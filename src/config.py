@@ -150,7 +150,7 @@ SEARCH_DAYS_LIMIT = 14
 NAVER_DISPLAY_COUNT = 20
 
 # Gemini Rate Limiting (초 단위)
-GEMINI_RATE_LIMIT_DELAY = 0.5  # 분당 15 RPM 준수
+GEMINI_RATE_LIMIT_DELAY = 4.0  # 분당 15 RPM (4초 간격) 준수
 
 
 # ===========================
