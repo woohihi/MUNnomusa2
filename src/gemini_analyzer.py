@@ -40,22 +40,17 @@ class GeminiAnalyzer:
         else:
             raise ValueError("사용 가능한 Gemini 모델이 없습니다.")
     
-    def analyze(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+
+    def analyze(self, item: Dict[str, Any], callback=None) -> Optional[Dict[str, Any]]:
         """
-        단일 공고 분석
+        Gemini를 사용하여 공고 분석 (429 Quota Exceeded 재시도 로직 포함)
         
         Args:
-            item: 네이버 검색 결과 {'title': '...', 'description': '...', 'link': '...'}
-        
+            item: 공고 정보 딕셔너리
+            callback: 상태 업데이트용 콜백 함수
+            
         Returns:
-            분석 결과 딕셔너리 또는 None (적합하지 않으면)
-            {
-                'is_relevant': True,
-                'summary': '요약',
-                'deadline': 'YYYY-MM-DD',
-                'term_months': 24,
-                'start_date': 'YYYY-MM-DD'
-            }
+            분석 결과 딕셔너리 또는 None
         """
         title = item.get('title', '')
         description = item.get('description', '')
@@ -68,6 +63,10 @@ class GeminiAnalyzer:
         prompt = self._build_prompt(title, description, is_empty_body)
         
         max_retries = 3
+        
+        # 기본 딜레이 (4초)
+        time.sleep(GEMINI_RATE_LIMIT_DELAY)
+        
         base_delay = 10  # 429 발생 시 기본 대기 시간 (초)
 
         for attempt in range(max_retries + 1):
@@ -77,9 +76,6 @@ class GeminiAnalyzer:
                 
                 # JSON 파싱
                 result = self._parse_response(response.text)
-                
-                # Rate Limiting (성공 시 기본 딜레이)
-                time.sleep(GEMINI_RATE_LIMIT_DELAY)
                 
                 # 적합하지 않으면 None 반환
                 if not result or not result.get('is_relevant'):
@@ -94,13 +90,21 @@ class GeminiAnalyzer:
             except Exception as e:
                 error_msg = str(e)
                 print(f"🐞 예외 타입: {type(e)}") # 디버깅용
-                print(f"📄 예외 메시지: {error_msg[:100]}...") # 메시지 앞부분 확인
-                # 429 Quota Exceeded 처리
-                if "429" in error_msg or "quota" in error_msg.lower() or "resource exhausted" in error_msg.lower():
+                print(f"📄 예외 메시지: {error_msg[:100]}...")
+                
+                # 429 Quota Exceeded 또는 503 Service Unavailable 처리
+                if "429" in error_msg or "quota" in error_msg.lower() or "resource exhausted" in error_msg.lower() or "503" in error_msg:
                     if attempt < max_retries:
                         wait_time = base_delay * (2 ** attempt)  # 10s, 20s, 40s
-                        print(f"⏳ Quota 초과 (429). {wait_time}초 후 재시도... ({attempt + 1}/{max_retries})")
-                        time.sleep(wait_time)
+                        msg = f"⏳ Quota 초과 (429/503). {wait_time}초 대기 중... ({attempt + 1}/{max_retries})"
+                        print(msg)
+                        
+                        # 사용자에게 대기 상태 알림 (카운트다운)
+                        for remaining in range(wait_time, 0, -1):
+                            if callback:
+                                callback(f"{msg[:-1]}, {remaining}s...)")
+                            time.sleep(1)
+                            
                         continue
                     else:
                         print(f"❌ Gemini 분석 실패 (최대 재시도 초과): {e}")
@@ -190,7 +194,7 @@ class GeminiAnalyzer:
                 continue
             
             # 그 외는 Gemini 분석
-            result = self.analyze(item)
+            result = self.analyze(item, callback=callback)
             
             if result:
                 # 원본 데이터 추가
