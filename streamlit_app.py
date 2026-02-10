@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import io
+import time
 
 # 로컬 모듈 import
 from src.sheets_manager import GoogleSheetManager
