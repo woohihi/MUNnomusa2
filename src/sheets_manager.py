@@ -372,11 +372,22 @@ class GoogleSheetManager:
             results_sheet = self.spreadsheet.worksheet(SHEET_NAMES['results'])
             expired_urls = [r['url'] for r in expired_rows]
             
-            all_records = results_sheet.get_all_records()
+            # get_all_records 대신 get_all_values 사용 (행 번호 정확도 보장)
+            all_values = results_sheet.get_all_values()
+            if len(all_values) < 2:
+                return
+
+            headers = all_values[0]
+            try:
+                url_col_idx = headers.index('url')
+            except ValueError:
+                return
+
             rows_to_delete = []
             
-            for idx, record in enumerate(all_records, start=2):  # 헤더 skip
-                if record.get('url') in expired_urls:
+            for idx, row in enumerate(all_values[1:], start=2):  # 헤더 skip
+                current_url = row[url_col_idx] if len(row) > url_col_idx else ''
+                if current_url in expired_urls:
                     rows_to_delete.append(idx)
             
             # 역순으로 삭제 (행 번호 변경 방지)
@@ -855,14 +866,33 @@ class GoogleSheetManager:
                 self.init_archive_sheet()
                 archive_sheet = self.spreadsheet.worksheet(SHEET_NAMES['archive'])
             
-            records = results_sheet.get_all_records()
+            # get_all_records 대신 get_all_values 사용 (행 번호 정확도 보장)
+            all_values = results_sheet.get_all_values()
+            if len(all_values) < 2:
+                return
+                
+            headers = all_values[0]
+            try:
+                url_col_idx = headers.index('url')
+            except ValueError:
+                print("❌ 'url' 컬럼을 찾을 수 없습니다.")
+                return
+
             rows_to_move = []
             rows_to_delete = []
             
-            for idx, record in enumerate(records, start=2):  # 헤더 skip
-                if record.get('url') in urls:
+            for idx, row in enumerate(all_values[1:], start=2):  # 헤더 skip
+                current_url = row[url_col_idx] if len(row) > url_col_idx else ''
+                
+                if current_url in urls:
+                    # Dict로 변환
+                    record = {
+                        header: (row[i] if len(row) > i else '') 
+                        for i, header in enumerate(headers)
+                    }
+                    
                     # Archive 컬럼 추가
-                    archive_row = {**record}
+                    archive_row = record.copy()
                     archive_row['term_months'] = ''
                     archive_row['start_date'] = ''
                     archive_row['next_expected_date'] = ''
@@ -906,18 +936,38 @@ class GoogleSheetManager:
             source_sheet_name = SHEET_NAMES[source]
             source_sheet = self.spreadsheet.worksheet(source_sheet_name)
             
-            records = source_sheet.get_all_records()
+            # get_all_values 사용
+            all_values = source_sheet.get_all_values()
+            if len(all_values) < 2:
+                return
+                
+            headers = all_values[0]
+            try:
+                url_col_idx = headers.index('url')
+                title_col_idx = headers.index('title') if 'title' in headers else -1
+            except ValueError:
+                print("❌ 'url' 컬럼을 찾을 수 없습니다.")
+                return
+
+            items_to_add = []
             rows_to_delete = []
             
-            for idx, record in enumerate(records, start=2):  # 헤더 skip
-                if record.get('url') in urls:
-                    # 제외 목록에 추가
-                    self.add_to_excluded(
-                        url=record.get('url', ''),
-                        title=record.get('title', ''),
-                        reason=reason
-                    )
+            for idx, row in enumerate(all_values[1:], start=2):  # 헤더 skip
+                current_url = row[url_col_idx] if len(row) > url_col_idx else ''
+                
+                if current_url in urls:
+                    current_title = row[title_col_idx] if (title_col_idx != -1 and len(row) > title_col_idx) else 'Unknown'
+                    
+                    items_to_add.append({
+                        'url': current_url,
+                        'title': current_title,
+                        'reason': reason
+                    })
                     rows_to_delete.append(idx)
+            
+            # 제외 목록에 배치 추가
+            if items_to_add:
+                self.add_to_excluded_batch(items_to_add)
             
             # 원본에서 삭제 (역순)
             for row_idx in sorted(rows_to_delete, reverse=True):

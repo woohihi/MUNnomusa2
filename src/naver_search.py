@@ -126,19 +126,20 @@ class NaverSearcher:
     # Track A: VIP 기관 검색
     # ===========================
     
-    def search_track_a(self, organizations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def search_track_a(self, organizations: List[Dict[str, Any]], callback=None) -> List[Dict[str, Any]]:
         """
         Track A: VIP 타겟 기관 정밀 감시
         
         Args:
             organizations: Config Sheet에서 로드한 기관 리스트
+            callback: 진행 상황 업데이트용 콜백 함수 (optional)
         
         Returns:
             검색 결과 리스트 (source='track_a' 태그 추가됨)
         """
         all_results = []
         
-        for org in organizations:
+        for idx, org in enumerate(organizations):
             org_name = org['organization']
             org_keywords = org.get('keywords', '').split(',')  # 쉼표로 구분된 키워드
             
@@ -148,6 +149,11 @@ class NaverSearcher:
                 if not kw:
                     continue
                     
+                if callback:
+                    callback(f"🔎 [Track A] 검색 중 ({idx+1}/{len(organizations)}): {org_name} - {kw}")
+                else:
+                    print(f"🔎 [Track A] 검색 중: {org_name} - {kw}")
+                
                 # 쿼리: {기관명} {키워드}
                 query = f"{org_name} {kw}"
                 results = self.search(query, display=10)
@@ -175,12 +181,13 @@ class NaverSearcher:
     # Track B: 광역 키워드 검색
     # ===========================
     
-    def search_track_b(self, keywords: List[str] = None) -> List[Dict[str, Any]]:
+    def search_track_b(self, keywords: List[str] = None, callback=None) -> List[Dict[str, Any]]:
         """
         Track B: 신규 기관 광역 발굴
         
         Args:
             keywords: 직무 키워드 리스트 (None이면 기본값 사용)
+            callback: 진행 상황 업데이트용 콜백 함수 (optional)
         
         Returns:
             검색 결과 리스트 (source='track_b' 태그 추가됨)
@@ -190,7 +197,12 @@ class NaverSearcher:
         
         all_results = []
         
-        for keyword in keywords:
+        for idx, keyword in enumerate(keywords):
+            if callback:
+                callback(f"🌍 [Track B] 광역 검색 중 ({idx+1}/{len(keywords)}): {keyword}")
+            else:
+                print(f"🌍 [Track B] 광역 검색 중: {keyword}")
+                
             # 쿼리: {키워드} 그대로 검색
             query = keyword
             results = self.search(query, display=15)
@@ -218,24 +230,28 @@ class NaverSearcher:
     # 통합 검색
     # ===========================
     
-    def search_all(self, organizations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def search_all(self, organizations: List[Dict[str, Any]], callback=None) -> List[Dict[str, Any]]:
         """
         Track A + Track B 통합 검색
         
         Args:
             organizations: Config Sheet 기관 리스트
+            callback: 진행 상황 업데이트용 콜백 함수 (optional)
         
         Returns:
             통합 검색 결과
         """
-        print("🔍 Two-Track 검색 시작...")
-        print("-" * 50)
+        if callback:
+            callback("🔍 Two-Track 검색 시작...")
+        else:
+            print("🔍 Two-Track 검색 시작...")
+            print("-" * 50)
         
         # Track A
-        track_a_results = self.search_track_a(organizations)
+        track_a_results = self.search_track_a(organizations, callback)
         
         # Track B
-        track_b_results = self.search_track_b()
+        track_b_results = self.search_track_b(callback=callback)
         
         # 합치기 및 중복 제거
         all_results = track_a_results + track_b_results

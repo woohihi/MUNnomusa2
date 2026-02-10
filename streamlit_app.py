@@ -15,6 +15,7 @@ from src.preprocessor import Preprocessor
 from src.gemini_analyzer import GeminiAnalyzer
 from src.predictor import Predictor
 from src.email_sender import EmailSender
+from src.streamlit_logger import get_logger
 
 
 # ===========================
@@ -165,43 +166,45 @@ with tab1:
         else:
             display_df = display_df.sort_values('organization')
         
-        # 표시
-        st.dataframe(
-            display_df[['organization', 'title', 'deadline', 'D-day', 'summary', 'url']],
-            use_container_width=True,
+        # 체크박스 컬럼 추가
+        display_df.insert(0, "선택", False)
+
+        # 표시 (Data Editor로 변경)
+        edited_df = st.data_editor(
+            display_df,
             hide_index=True,
+            use_container_width=True,
             column_config={
-                'organization': '기관명',
-                'title': '제목',
-                'deadline': '마감일',
-                'D-day': 'D-day',
-                'summary': '요약',
-                'url': st.column_config.LinkColumn('링크', display_text='🔗 바로가기')
-            }
+                "선택": st.column_config.CheckboxColumn("선택", width="small"),
+                'organization': st.column_config.TextColumn('기관명', width='medium'),
+                'title': st.column_config.TextColumn('제목', width='large'),
+                'deadline': st.column_config.TextColumn('마감일', width='small'),
+                'D-day': st.column_config.TextColumn('D-day', width='small'),
+                'summary': st.column_config.TextColumn('요약', width='medium'),
+                'url': st.column_config.LinkColumn('링크', display_text='🔗 바로가기', width='small')
+            },
+            disabled=['organization', 'title', 'deadline', 'D-day', 'summary', 'url'],  # 선택 컬럼 외에는 읽기 전용
+            key="results_editor"
         )
         
         st.caption(f"총 {len(display_df)}건")
         
         # ===========================
-        # 수동 분류 기능
+        # 일괄 처리 기능
         # ===========================
         
-        st.subheader("📂 수동 분류")
+        # 선택된 행 추출
+        selected_rows = edited_df[edited_df['선택']]
         
-        # 선택할 URL 목록
-        selected_urls = st.multiselect(
-            "분류할 공고 선택 (URL로 선택)",
-            options=display_df['url'].tolist(),
-            format_func=lambda x: display_df[display_df['url'] == x]['title'].values[0][:50] + '...' if len(display_df[display_df['url'] == x]['title'].values[0]) > 50 else display_df[display_df['url'] == x]['title'].values[0]
-        )
-        
-        if selected_urls:
-            st.info(f"📌 {len(selected_urls)}건 선택됨")
+        if not selected_rows.empty:
+            st.divider()
+            st.info(f"📌 {len(selected_rows)}건이 선택되었습니다.")
             
             col1, col2 = st.columns(2)
+            selected_urls = selected_rows['url'].tolist()
             
             with col1:
-                if st.button("📦 선택 항목 → Archive 이동", type="secondary", use_container_width=True):
+                if st.button("📦 선택 항목 일괄 Archive 이동", type="primary", use_container_width=True):
                     try:
                         manager.move_to_archive(selected_urls)
                         st.success(f"✅ {len(selected_urls)}건 Archive로 이동 완료!")
@@ -211,8 +214,8 @@ with tab1:
                         st.error(f"❌ 이동 실패: {e}")
             
             with col2:
-                reason = st.text_input("제외 사유", value="관련 없음", key="exclude_reason")
-                if st.button("🚫 선택 항목 → 제외 목록 추가", type="primary", use_container_width=True):
+                reason = st.text_input("제외 사유", value="관련 없음", key="exclude_reason_batch")
+                if st.button("🚫 선택 항목 일괄 제외 처리", type="secondary", use_container_width=True):
                     try:
                         manager.move_to_excluded(selected_urls, source='results', reason=reason)
                         st.success(f"✅ {len(selected_urls)}건 제외 목록에 추가 완료!")
@@ -359,10 +362,29 @@ with tab2:
             result_urls = manager.get_result_urls()
             archive_urls = manager.get_archive_urls()
             
+            sheet_id = manager.config.get('google_sheets_id')
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}" if sheet_id else "#"
+            
             col1, col2, col3 = st.columns(3)
-            col1.metric("📌 현재 공고 (Results)", f"{len(result_urls)}건")
-            col2.metric("📁 마감 공고 (Archive)", f"{len(archive_urls)}건")
-            col3.metric("🔗 총 URL (중복 제외)", f"{len(result_urls) + len(archive_urls)}건")
+            
+            with col1:
+                st.metric("📌 현재 공고 (Results)", f"{len(result_urls)}건")
+                if sheet_id:
+                    # st.link_button 대신 마크다운 링크 사용 (호환성 및 직관성)
+                    st.markdown(f"👉 [**Results 시트 열기**]({sheet_url})")
+            
+            with col2:
+                st.metric("📁 마감 공고 (Archive)", f"{len(archive_urls)}건")
+                if sheet_id:
+                    st.markdown(f"👉 [**Archive 시트 열기**]({sheet_url})")
+            
+            with col3:
+                st.metric("🔗 총 URL (중복 제외)", f"{len(result_urls) + len(archive_urls)}건")
+                if sheet_id:
+                    st.markdown(f"👉 [**전체 시트 열기**]({sheet_url})")
+            
+            if not sheet_id:
+                st.error("⚠️ Google Sheet ID를 찾을 수 없습니다. 설정(Secrets)을 확인하세요.")
             
             st.caption("위 URL들은 검색 결과에서 자동으로 제외됩니다.")
     
@@ -378,17 +400,33 @@ with tab2:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        # 터미널 로그 창
+        with st.expander("🖥️ 실시간 터미널 로그", expanded=True):
+            log_container = st.empty()
+            
+        logger = get_logger()
+        logger.clear()
+        
+        def update_log(message):
+            status_text.text(message)
+            # "Step X/4" 메시지는 로그에 중복해서 남기지 않거나, 필요하다면 남김
+            # 여기서는 깔끔하게 하기 위해 Step 메시지도 로그에 남김
+            logger.info(message)
+            log_container.code(logger.get_logs(), language="bash")
+        
         try:
             # Step 1: 네이버 검색
-            status_text.text("Step 1/4: 네이버 검색 중...")
+            update_log("Step 1/4: 네이버 검색 중...")
             progress_bar.progress(25)
             
             searcher = NaverSearcher()
             orgs = manager.read_config()
             
-            search_results = searcher.search_all(orgs)
+            search_results = searcher.search_all(orgs, callback=update_log)
             
             st.success(f"✅ 검색 완료: {len(search_results)}건 수집")
+            logger.info(f"✅ 검색 완료: {len(search_results)}건 수집")
+            log_container.code(logger.get_logs(), language="bash")
             
             # SearchLog에 수집된 모든 결과 저장
             from datetime import datetime
@@ -411,7 +449,7 @@ with tab2:
 
             
             # Step 2: 전처리
-            status_text.text("Step 2/4: 전처리 중 (중복 제거, 키워드 필터링)...")
+            update_log("Step 2/4: 전처리 중 (중복 제거, 키워드 필터링)...")
             progress_bar.progress(50)
             
             existing_urls = manager.get_result_urls() + manager.get_archive_urls()
@@ -423,6 +461,8 @@ with tab2:
             stats = preprocessor.get_stats()
             filtered_items = preprocessor.get_filtered_items()
             st.info(f"전처리 완료: {stats['passed']}건 통과 (필터링률: {stats['filter_rate']:.1f}%)")
+            logger.info(f"전처리 완료: {stats['passed']}건 통과 (필터링률: {stats['filter_rate']:.1f}%)")
+            log_container.code(logger.get_logs(), language="bash")
             
             if not filtered_results:
                 st.warning("⚠️  신규 공고가 없습니다. 모두 중복이거나 필터링되었습니다.")
@@ -449,11 +489,11 @@ with tab2:
                 st.stop()
             
             # Step 3: Gemini 분석
-            status_text.text(f"Step 3/4: AI 분석 중 ({len(filtered_results)}건)...")
+            update_log(f"Step 3/4: AI 분석 중 ({len(filtered_results)}건)...")
             progress_bar.progress(75)
             
             analyzer = GeminiAnalyzer()
-            analyzed_results = analyzer.analyze_batch(filtered_results)
+            analyzed_results = analyzer.analyze_batch(filtered_results, callback=update_log)
             
             st.success(f"✅ AI 분석 완료: {len(analyzed_results)}건 적합")
             
@@ -559,7 +599,7 @@ with tab2:
                 st.stop()
             
             # Step 4: Google Sheets 저장
-            status_text.text("Step 4/4: 데이터베이스 업데이트 중...")
+            update_log("Step 4/4: 데이터베이스 업데이트 중...")
             progress_bar.progress(90)
             
             # 데이터 변환 (마감 여부에 따라 초기 분류)
@@ -594,7 +634,7 @@ with tab2:
                 all_records.append(record)
             
             progress_bar.progress(100)
-            status_text.text("✅ 분석 완료! 아래에서 분류를 확인/수정하고 저장하세요.")
+            update_log("✅ 분석 완료! 아래에서 분류를 확인/수정하고 저장하세요.")
             
             # 세션에 결과 저장 (분류 선택용)
             st.session_state.pending_records = all_records
@@ -622,10 +662,14 @@ with tab2:
         # 분류 컬럼 이름 변경 (suggested_target → 분류)
         df = df.rename(columns={'suggested_target': '분류'})
         
+        # 체크박스 컬럼 추가
+        df.insert(0, "선택", False)
+        
         # 편집 가능한 테이블
         edited_df = st.data_editor(
-            df[['title', 'organization', 'deadline', 'summary', '분류', 'url']],
+            df[['선택', 'title', 'organization', 'deadline', 'summary', '분류', 'url']],
             column_config={
+                "선택": st.column_config.CheckboxColumn("선택", width="small"),
                 'title': st.column_config.TextColumn('제목', width='large'),
                 'organization': st.column_config.TextColumn('기관', width='small'),
                 'deadline': st.column_config.TextColumn('마감일', width='small'),
@@ -642,6 +686,43 @@ with tab2:
             use_container_width=True,
             key='classification_editor'
         )
+        
+        # ===========================
+        # 일괄 변경 버튼
+        # ===========================
+        
+        # 선택된 인덱스 확인
+        selected_indices = edited_df[edited_df['선택']].index.tolist()
+        
+        if selected_indices:
+            st.info(f"📌 {len(selected_indices)}건 선택됨 - 아래 버튼을 눌러 일괄 변경하세요.")
+            
+            b1, b2, b3 = st.columns(3)
+            
+            # 주의: df의 인덱스와 session_state.pending_records의 순서가 일치한다고 가정
+            
+            with b1:
+                if st.button("✅ 선택 → Results", use_container_width=True):
+                    for idx in selected_indices:
+                        st.session_state.pending_records[idx]['suggested_target'] = 'Results'
+                    st.success("변경 완료!")
+                    st.rerun()
+            
+            with b2:
+                if st.button("📦 선택 → Archive", use_container_width=True):
+                    for idx in selected_indices:
+                        st.session_state.pending_records[idx]['suggested_target'] = 'Archive'
+                    st.success("변경 완료!")
+                    st.rerun()
+            
+            with b3:
+                if st.button("🚫 선택 → Excluded", use_container_width=True):
+                    for idx in selected_indices:
+                        st.session_state.pending_records[idx]['suggested_target'] = 'Excluded'
+                    st.success("변경 완료!")
+                    st.rerun()
+            
+            st.divider()
         
         # 저장 버튼
         col1, col2 = st.columns(2)

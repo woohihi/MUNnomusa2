@@ -54,6 +54,16 @@ def get_config() -> Dict[str, Any]:
     if not config.get('gcp_service_account') and os.getenv('GOOGLE_SHEETS_CREDS'):
         import json
         config['gcp_service_account'] = json.loads(os.getenv('GOOGLE_SHEETS_CREDS'))
+
+    # 이메일 설정 (환경 변수)
+    if not config.get('email') and os.getenv('SENDER_EMAIL'):
+        config['email'] = {
+            'smtp_server': os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
+            'smtp_port': int(os.getenv('SMTP_PORT', 587)),
+            'sender_email': os.getenv('SENDER_EMAIL', ''),
+            'sender_password': os.getenv('SENDER_PASSWORD', ''),
+            'recipient_email': os.getenv('RECIPIENT_EMAIL', '')
+        }
     
     return config
 
@@ -158,7 +168,12 @@ VALID_KEYWORDS = [
 NEGATIVE_KEYWORDS = [
     '입찰', '구매', '청소', 
     '경비', '아파트', '시스템 구축', '건설', 
-    '시공', '납품', '물품', '설비'
+    '시공', '납품', '물품', '설비',
+    # 노이즈 필터 (자소서, 뉴스, 광고 등)
+    '자기소개서', '자소서', '합격후기', '면접후기', 
+    '수강', '강의', '설명회', '이벤트',
+    '기자', '보도자료', '뉴스', '신문',
+    '홍보', '광고', '무료상담'
 ]
 
 

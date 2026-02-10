@@ -91,18 +91,22 @@ class GeminiAnalyzer:
             print(f"❌ Gemini 분석 실패: {e}")
             return None
     
-    def analyze_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def analyze_batch(self, items: List[Dict[str, Any]], callback=None) -> List[Dict[str, Any]]:
         """
         여러 공고 배치 분석
         
         Args:
             items: 검색 결과 리스트
+            callback: 진행 상황 업데이트용 콜백 함수 (optional)
         
         Returns:
             적합한 공고 리스트
         """
-        print(f"🤖 Gemini 분석 시작: {len(items)}건")
-        print("-" * 50)
+        if callback:
+            callback(f"🤖 Gemini 분석 시작: {len(items)}건")
+        else:
+            print(f"🤖 Gemini 분석 시작: {len(items)}건")
+            print("-" * 50)
         
         relevant_items = []
         self.rejected_items = []  # 거부된 항목 추적
@@ -117,7 +121,10 @@ class GeminiAnalyzer:
         current_year = datetime.now().year
         
         for idx, item in enumerate(items, start=1):
-            print(f"분석 중... ({idx}/{len(items)})", end='\r')
+            if callback:
+                callback(f"🤖 분석 중... ({idx}/{len(items)}): {item.get('title', '')[:30]}...")
+            else:
+                print(f"분석 중... ({idx}/{len(items)})", end='\r')
             
             title = item.get('title', '')
             title_lower = title.lower()
@@ -257,6 +264,13 @@ summary에 "⚠️ 첨부파일 확인 필요" 문구를 추가하세요.
    - 마감일 정보가 없거나 불명확해도 관련 공고면 true (마감일은 별도 확인 가능)
    - **중요: 마감일이 이미 지났더라도 노무 관련 공고면 무조건 is_relevant=true로 판정**
    - **과거 공고도 '과거 자료'로 Archive에 기록되므로 마감 여부와 관계없이 적합성만 판단**
+   - **제외 대상 (is_relevant=false)**:
+     - 단순 뉴스 기사, 보도자료, 인터뷰 (채용 공고가 아님)
+     - 노무법인/법률사무소의 자체 홍보글, 광고, 블로그 마케팅
+     - "합격 자기소개서", "면접 후기", "취업 팁", "강의 홍보"
+     - 특정 사건 수임 홍보 ("XX사건 승소 사례" 등)
+     - 단순 용역 입찰 (청소, 경비, 시설관리 등)
+     - 노무사가 아닌 일반 직원(사무직, 경리 등) 채용 공고
    - 단, 명백히 관련 없는 공고 (채용 아닌 일반 뉴스, 상품 광고 등)만 false
 
 2. **요약 (summary)**:
