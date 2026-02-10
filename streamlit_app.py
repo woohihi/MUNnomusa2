@@ -422,7 +422,23 @@ with tab2:
             searcher = NaverSearcher()
             orgs = manager.read_config()
             
-            search_results = searcher.search_all(orgs, callback=update_log)
+            try:
+                # callback 인자 지원 여부 확인 (구버전 캐시 문제 대응)
+                import inspect
+                sig = inspect.signature(searcher.search_all)
+                if 'callback' in sig.parameters:
+                    search_results = searcher.search_all(orgs, callback=update_log)
+                else:
+                    st.warning("⚠️ 검색 모듈이 구버전입니다 (진행률 표시 제한). 캐시를 삭제해주세요.")
+                    update_log("네이버 검색 시작...")
+                    search_results = searcher.search_all(orgs)
+            except TypeError as e:
+                # 만약 inspect로도 걸러지지 않는 경우 대비
+                if "unexpected keyword argument 'callback'" in str(e):
+                    st.warning("⚠️ 검색 모듈 호환성 문제로 진행률 표시 없이 검색합니다.")
+                    search_results = searcher.search_all(orgs)
+                else:
+                    raise e
             
             st.success(f"✅ 검색 완료: {len(search_results)}건 수집")
             logger.info(f"✅ 검색 완료: {len(search_results)}건 수집")
