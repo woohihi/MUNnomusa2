@@ -407,11 +407,21 @@ with tab2:
         logger = get_logger()
         logger.clear()
         
+        # 마지막 업데이트 시간 추적 (UI 렌더링 부하 감소용)
+        last_update_time = [0.0]  # 리스트로 래핑하여 closure에서 수정 가능하게 함
+        
         def update_log(message):
             status_text.text(message)
-            # "Step X/4" 메시지는 로그에 중복해서 남기지 않거나, 필요하다면 남김
-            # 여기서는 깔끔하게 하기 위해 Step 메시지도 로그에 남김
             logger.info(message)
+            
+            # 터미널 로그는 0.3초마다 한 번씩만 렌더링 (웹소켓 부하 방지)
+            current_time = time.time()
+            if current_time - last_update_time[0] > 0.3:
+                log_container.code(logger.get_logs(), language="bash")
+                last_update_time[0] = current_time
+        
+        # 마지막에 한 번 강제 업데이트를 위한 함수
+        def final_log_update():
             log_container.code(logger.get_logs(), language="bash")
         
         try:
@@ -442,7 +452,7 @@ with tab2:
             
             st.success(f"✅ 검색 완료: {len(search_results)}건 수집")
             logger.info(f"✅ 검색 완료: {len(search_results)}건 수집")
-            log_container.code(logger.get_logs(), language="bash")
+            final_log_update()
             
             # SearchLog에 수집된 모든 결과 저장
             from datetime import datetime
@@ -478,7 +488,7 @@ with tab2:
             filtered_items = preprocessor.get_filtered_items()
             st.info(f"전처리 완료: {stats['passed']}건 통과 (필터링률: {stats['filter_rate']:.1f}%)")
             logger.info(f"전처리 완료: {stats['passed']}건 통과 (필터링률: {stats['filter_rate']:.1f}%)")
-            log_container.code(logger.get_logs(), language="bash")
+            final_log_update()
             
             if not filtered_results:
                 st.warning("⚠️  신규 공고가 없습니다. 모두 중복이거나 필터링되었습니다.")
@@ -651,6 +661,7 @@ with tab2:
             
             progress_bar.progress(100)
             update_log("✅ 분석 완료! 아래에서 분류를 확인/수정하고 저장하세요.")
+            final_log_update()
             
             # 세션에 결과 저장 (분류 선택용)
             st.session_state.pending_records = all_records
