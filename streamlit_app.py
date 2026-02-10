@@ -664,193 +664,22 @@ with tab2:
             update_log("✅ 분석 완료! 아래에서 분류를 확인/수정하고 저장하세요.")
             final_log_update()
             
-            # 세션에 결과 저장 (분류 선택용)
-            st.session_state.pending_records = all_records
-            st.session_state.search_completed = True
+            # 1. 구글 시트 Pending 탭에 저장 (세션 만료 방지)
+            if all_records:
+                update_log("Step 5/5: 결과 저장 중...")
+                manager.append_pending_batch(all_records)
+                st.success(f"✅ {len(all_records)}건의 결과를 'Pending' 시트에 저장했습니다. 화면이 곧 갱신됩니다.")
+                
+            final_log_update()
+            
+            # 2. 화면 갱신 (Pending 섹션에서 검토 진행)
+            time.sleep(2)
+            st.rerun()
             
         except Exception as e:
             st.error(f"❌ 검색 중 오류 발생: {e}")
             import traceback
             st.code(traceback.format_exc())
-    
-    # ===========================
-    # 분류 및 저장 UI (검색 완료 후)
-    # ===========================
-    
-    if st.session_state.get('search_completed') and st.session_state.get('pending_records'):
-        st.divider()
-        st.header("📂 검색 결과 분류")
-        st.info("'분류' 컬럼에서 직접 선택하세요. 수정 후 '저장' 버튼을 클릭하면 됩니다.")
-        
-        records = st.session_state.pending_records
-        
-        # 데이터프레임 생성
-        df = pd.DataFrame(records)
-        
-        # 분류 컬럼 이름 변경 (suggested_target → 분류)
-        df = df.rename(columns={'suggested_target': '분류'})
-        
-        # 체크박스 컬럼 추가
-        df.insert(0, "선택", False)
-        
-        # 편집 가능한 테이블
-        edited_df = st.data_editor(
-            df[['선택', 'title', 'organization', 'deadline', 'summary', '분류', 'url']],
-            column_config={
-                "선택": st.column_config.CheckboxColumn("선택", width="small"),
-                'title': st.column_config.TextColumn('제목', width='large'),
-                'organization': st.column_config.TextColumn('기관', width='small'),
-                'deadline': st.column_config.TextColumn('마감일', width='small'),
-                'summary': st.column_config.TextColumn('요약', width='medium'),
-                '분류': st.column_config.SelectboxColumn(
-                    '분류',
-                    options=['Results', 'Archive', 'Excluded'],
-                    required=True,
-                    width='small'
-                ),
-                'url': st.column_config.LinkColumn('URL', width='small', display_text='🔗')
-            },
-            hide_index=True,
-            use_container_width=True,
-            key='classification_editor'
-        )
-        
-        # ===========================
-        # 일괄 변경 버튼
-        # ===========================
-        
-        # 선택된 인덱스 확인
-        selected_indices = edited_df[edited_df['선택']].index.tolist()
-        
-        if selected_indices:
-            st.info(f"📌 {len(selected_indices)}건 선택됨 - 아래 버튼을 눌러 일괄 변경하세요.")
-            
-            b1, b2, b3 = st.columns(3)
-            
-            # 주의: df의 인덱스와 session_state.pending_records의 순서가 일치한다고 가정
-            
-            with b1:
-                if st.button("✅ 선택 → Results", use_container_width=True):
-                    for idx in selected_indices:
-                        st.session_state.pending_records[idx]['suggested_target'] = 'Results'
-                    st.success("변경 완료!")
-                    st.rerun()
-            
-            with b2:
-                if st.button("📦 선택 → Archive", use_container_width=True):
-                    for idx in selected_indices:
-                        st.session_state.pending_records[idx]['suggested_target'] = 'Archive'
-                    st.success("변경 완료!")
-                    st.rerun()
-            
-            with b3:
-                if st.button("🚫 선택 → Excluded", use_container_width=True):
-                    for idx in selected_indices:
-                        st.session_state.pending_records[idx]['suggested_target'] = 'Excluded'
-                    st.success("변경 완료!")
-                    st.rerun()
-            
-            st.divider()
-        
-        # 저장 버튼
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("💾 분류대로 저장", type="primary", use_container_width=True):
-                manager = get_sheets_manager()
-                
-                results_to_save = []
-                archive_to_save = []
-                excluded_to_save = []
-                
-                for idx, row in edited_df.iterrows():
-                    target = row['분류']
-                    record = {
-                        'url': row['url'],
-                        'title': row['title'],
-                        'organization': row['organization'],
-                        'deadline': row['deadline'],
-                        'summary': row['summary'],
-                        'collected_date': datetime.now().strftime('%Y-%m-%d')
-                    }
-                    
-                    if target == "Results":
-                        results_to_save.append(record)
-                    elif target == "Archive":
-                        record['term_months'] = ''
-                        record['start_date'] = ''
-                        record['next_expected_date'] = ''
-                        archive_to_save.append(record)
-                    elif target == "Excluded":
-                        excluded_to_save.append({
-                            'url': record['url'],
-                            'title': record['title'],
-                            'reason': '수동 제외 (검색 결과에서)'
-                        })
-                
-                # 배치 저장 (API 호출 최소화)
-                if results_to_save:
-                    manager.append_results_batch(results_to_save)
-                if archive_to_save:
-                    manager.append_archive_batch(archive_to_save)
-                if excluded_to_save:
-                    manager.add_to_excluded_batch(excluded_to_save)
-                
-                # 자동 아카이빙
-                manager.archive_expired()
-                
-                st.success(f"✅ 저장 완료! Results: {len(results_to_save)}건, Archive: {len(archive_to_save)}건, Excluded: {len(excluded_to_save)}건")
-                
-                # 이메일 발송 세션에 저장 (선택적 발송용)
-                st.session_state.email_ready = True
-                st.session_state.saved_results_count = len(results_to_save)
-                st.session_state.saved_archive_count = len(archive_to_save)
-                
-                # 세션 정리
-                st.session_state.pending_records = None
-                st.session_state.search_completed = False
-                st.session_state.last_search_time = datetime.now()
-        
-        with col2:
-            if st.button("🗑️ 결과 취소", use_container_width=True):
-                st.session_state.pending_records = None
-                st.session_state.search_completed = False
-                st.warning("검색 결과가 취소되었습니다.")
-                st.rerun()
-    
-    # 이메일 발송 섹션 (저장 완료 후)
-    if st.session_state.get('email_ready'):
-        st.divider()
-        st.subheader("📧 일일 리포트 이메일 발송")
-        
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            st.info(f"저장 완료! Results: {st.session_state.get('saved_results_count', 0)}건, Archive: {st.session_state.get('saved_archive_count', 0)}건")
-        
-        with col2:
-            if st.button("📧 리포트 발송", type="primary", use_container_width=True):
-                try:
-                    # 데이터 로드
-                    manager = get_sheets_manager()
-                    search_logs = manager.read_search_log()
-                    results = manager.read_results().to_dict('records')
-                    archives = manager.read_archive().to_dict('records')
-                    
-                    # 이메일 발송
-                    sender = EmailSender()
-                    if sender.send_daily_report(search_logs, results, archives):
-                        st.success("✅ 일일 리포트 이메일 발송 완료!")
-                    else:
-                        st.error("❌ 이메일 발송 실패 (설정 확인 필요)")
-                    
-                    st.session_state.email_ready = False
-                except Exception as e:
-                    st.error(f"❌ 이메일 발송 오류: {e}")
-        
-        if st.button("❌ 이메일 발송 안 함"):
-            st.session_state.email_ready = False
-            st.rerun()
     
     # 마지막 검색 시간 표시
     if st.session_state.last_search_time:
