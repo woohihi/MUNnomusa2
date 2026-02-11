@@ -290,7 +290,7 @@ with tab2:
                         'url': st.column_config.LinkColumn('URL', width='small', display_text='🔗')
                     },
                     hide_index=True,
-                    use_container_width=True,
+                    width='stretch',
                     key='pending_editor'
                 )
                 
@@ -495,6 +495,24 @@ with tab2:
                 st.warning("⚠️  신규 공고가 없습니다. 모두 중복이거나 필터링되었습니다.")
                 progress_bar.progress(100)
                 
+                # 필터링 결과 SearchLog에 기록 (신규 없음)
+                filter_logs = []
+                filtered_items = preprocessor.get_filtered_items()
+                for item in filtered_items:
+                    filter_logs.append({
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'url': item.get('link', ''),
+                        'title': item.get('title', ''),
+                        'search_keyword': item.get('search_keyword', ''),
+                        'search_query': item.get('search_query', ''),
+                        'source': item.get('source', ''),
+                        'stage': 'filtered',
+                        'reason': item.get('filter_reason', '전처리 필터링')
+                    })
+                
+                if filter_logs:
+                    manager.append_search_log(filter_logs)
+                
                 # 이메일 발송 옵션 (신규 없어도 요약 보고서 발송 가능)
                 st.divider()
                 st.subheader("📧 검색 결과 요약 이메일 발송")
@@ -515,22 +533,18 @@ with tab2:
                 
                 st.stop()
             
-            # Step 3: Gemini 분석
-            update_log(f"Step 3/4: AI 분석 중 ({len(filtered_results)}건)...")
-            progress_bar.progress(75)
+            # ----------------------------------------------------------------
+            # Pre-Analysis Logging (Data Safety)
+            # ----------------------------------------------------------------
+            # 분석 전, 필터링된 항목과 분석 대상(Candidate)을 먼저 로그에 저장하여
+            # 분석 중 크래시가 발생하더라도 기록이 남도록 함.
             
-            analyzer = GeminiAnalyzer()
-            analyzed_results = analyzer.analyze_batch(filtered_results, callback=update_log)
+            pre_analysis_logs = []
             
-            st.success(f"✅ AI 분석 완료: {len(analyzed_results)}건 적합")
-            
-            # 필터링/거부 결과를 SearchLog에 기록
-            filter_logs = []
-            
-            # 전처리기에서 필터링된 항목 기록
+            # 1. 전처리에서 걸러진(Filtered) 항목
             filtered_items = preprocessor.get_filtered_items()
             for item in filtered_items:
-                filter_logs.append({
+                pre_analysis_logs.append({
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'url': item.get('link', ''),
                     'title': item.get('title', ''),
@@ -541,10 +555,40 @@ with tab2:
                     'reason': item.get('filter_reason', '전처리 필터링')
                 })
             
+            # 2. 분석 대상(Candidate) 항목 - 'analyzing' 상태로 기록
+            for item in filtered_results:
+                pre_analysis_logs.append({
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'url': item.get('link', ''),
+                    'title': item.get('title', ''),
+                    'search_keyword': item.get('search_keyword', ''),
+                    'search_query': item.get('search_query', ''),
+                    'source': item.get('source', ''),
+                    'stage': 'analyzing',  # 분석 시작 표시
+                    'reason': '1차 필터 통과 (분석 대기)'
+                })
+                
+            if pre_analysis_logs:
+                manager.append_search_log(pre_analysis_logs)
+                st.info(f"📝 SearchLog에 분석 대상 및 필터링 결과 {len(pre_analysis_logs)}건 보호 기록됨")
+
+            # Step 3: Gemini 분석
+            update_log(f"Step 3/4: AI 분석 중 ({len(filtered_results)}건)...")
+            progress_bar.progress(75)
+            
+            analyzer = GeminiAnalyzer()
+            analyzed_results = analyzer.analyze_batch(filtered_results, callback=update_log)
+            
+            st.success(f"✅ AI 분석 완료: {len(analyzed_results)}건 적합")
+            
+            # 분석 후 결과(Result/Rejected) 업데이트 로그
+            # SearchLog는 Append Only이므로 새로운 상태를 추가함
+            post_analysis_logs = []
+            
             # Gemini에서 거부된 항목 기록
             rejected_items = analyzer.get_rejected_items()
             for item in rejected_items:
-                filter_logs.append({
+                post_analysis_logs.append({
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'url': item.get('url', ''),
                     'title': item.get('title', ''),
@@ -557,7 +601,7 @@ with tab2:
             
             # AI 통과한 항목 기록 (saved 단계)
             for item in analyzed_results:
-                filter_logs.append({
+                post_analysis_logs.append({
                     'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'url': item.get('url', ''),
                     'title': item.get('original_title', ''),
@@ -568,9 +612,9 @@ with tab2:
                     'reason': f"적합 판정 - 마감일: {item.get('deadline', 'N/A')}"
                 })
             
-            if filter_logs:
-                manager.append_search_log(filter_logs)
-                st.info(f"📝 SearchLog에 필터링/저장 결과 {len(filter_logs)}건 기록됨")
+            if post_analysis_logs:
+                manager.append_search_log(post_analysis_logs)
+                st.info(f"📝 SearchLog에 최종 분석 결과 {len(post_analysis_logs)}건 업데이트됨")
             
             # 상세 로그 표시
             with st.expander("📊 검색 상세 로그 보기", expanded=False):
