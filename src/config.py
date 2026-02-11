@@ -40,7 +40,7 @@ def get_config() -> Dict[str, Any]:
             # Secrets 없을 때 환경 변수로 폴백
             pass
     
-    # 환경 변수에서 로드 (GitHub Actions, 로컬 개발용)
+    # 환경 변수에서 로드 (GitHub Actions 등)
     if not config.get('naver_client_id'):
         config['naver_client_id'] = os.getenv('NAVER_CLIENT_ID', '')
     if not config.get('naver_client_secret'):
@@ -64,6 +64,32 @@ def get_config() -> Dict[str, Any]:
             'sender_password': os.getenv('SENDER_PASSWORD', ''),
             'recipient_email': os.getenv('RECIPIENT_EMAIL', '')
         }
+
+    # 로컬 CLI 실행용: .streamlit/secrets.toml 직접 로드 (환경변수도 없을 경우)
+    if not config.get('naver_client_id') and os.path.exists('.streamlit/secrets.toml'):
+        try:
+            try:
+                import tomllib  # Python 3.11+
+                open_mode = 'rb'
+            except ImportError:
+                import toml as tomllib  # External lib
+                open_mode = 'r'
+                
+            with open('.streamlit/secrets.toml', open_mode) as f:
+                secrets = tomllib.load(f)
+                
+            config['naver_client_id'] = secrets.get('NAVER_CLIENT_ID', '')
+            config['naver_client_secret'] = secrets.get('NAVER_CLIENT_SECRET', '')
+            config['gemini_api_key'] = secrets.get('GEMINI_API_KEY', '')
+            config['google_sheets_id'] = secrets.get('GOOGLE_SHEETS_ID', '')
+            
+            if 'gcp_service_account' in secrets:
+                config['gcp_service_account'] = secrets['gcp_service_account']
+            
+            if 'email' in secrets:
+                config['email'] = secrets['email']
+        except Exception as e:
+            print(f"⚠️ 로컬 secrets.toml 로드 중 오류: {e}")
     
     return config
 

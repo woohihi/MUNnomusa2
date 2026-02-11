@@ -109,6 +109,17 @@ class GeminiAnalyzer:
                     else:
                         print(f"❌ Gemini 분석 실패 (최대 재시도 초과): {e}")
                         return None
+                
+                # [CRITICAL] 403 Permission Denied / API Key Leaked
+                elif "403" in error_msg or "permissiondenied" in error_msg.lower() or "leaked" in error_msg.lower():
+                    print("\n" + "="*60)
+                    print("🚨 [CRITICAL ERROR] Gemini API 키가 차단되었습니다.")
+                    print("이유: API Key가 유출(Leaked)되었거나 권한이 없습니다 (403).")
+                    print("="*60 + "\n")
+                    
+                    # 분석 실패 표시 (상위 호출자에게 알림)
+                    return {'critical_error': True, 'msg': 'API Key Blocked'}
+                    
                 else:
                     print(f"❌ Gemini 분석 실패: {e}")
                     return None
@@ -195,6 +206,31 @@ class GeminiAnalyzer:
             
             # 그 외는 Gemini 분석
             result = self.analyze(item, callback=callback)
+            
+            # [CRITICAL] 분석 중단 (API 키 차단 등)
+            if result and result.get('critical_error'):
+                print(f"⚠️  분석 중단: {result.get('msg')}")
+                print(f"👉 남은 항목 {len(items) - idx + 1}건을 '분석 미완료' 상태로 저장합니다.")
+                
+                # 현재 항목 + 남은 모든 항목을 '분석 미완료'로 처리하여 저장
+                remaining_items = items[idx-1:]
+                for rem_item in remaining_items:
+                    skipped_result = {
+                        'is_relevant': True,  # 일단 저장해야 하므로 True
+                        'url': rem_item.get('link', ''),
+                        'original_title': rem_item.get('title', ''),
+                        'summary': f"⚠️ [분석 실패] API 오류로 분석 건너뜀",
+                        'deadline': None,
+                        'term_months': None,
+                        'start_date': None,
+                        'is_past_announcement': False,
+                        'search_keyword': rem_item.get('search_keyword', ''),
+                        'search_query': rem_item.get('search_query', ''),
+                        'source': rem_item.get('source', '')
+                    }
+                    relevant_items.append(skipped_result)
+                
+                break  # 반복 종료
             
             if result:
                 # 원본 데이터 추가
