@@ -16,6 +16,111 @@ from .email_sender import EmailSender
 from .telegram_sender import send_search_summary as tg_summary, send_error_alert as tg_error
 
 
+def _reanalyze_pending(limit: int = 0) -> int:
+    """
+    Pending 시트의 '검토중' 항목을 URL 재방문 + 첨부파일 추출 후 Gemini 재분석.
+    '적합' / '거절' / '보류' 상태 항목은 건드리지 않음.
+    """
+    from .web_scraper import WebScraper
+    from .result_processor import ResultProcessor
+
+    print("=" * 60)
+    print("Pending 재분석 모드")
+    print(f"실행 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
+
+    try:
+        manager = GoogleSheetManager()
+        df = manager.read_pending()
+
+        if df.empty:
+            print("ℹ️  Pending 시트가 비어있습니다.")
+            return 0
+
+        # '검토중' 상태만 재분석 (이미 결정된 항목은 제외)
+        decided_statuses = {'적합', '거절', '보류'}
+        mask_reanalyze = ~df.get('status', '').isin(decided_statuses)
+        to_reanalyze = df[mask_reanalyze].to_dict('records')
+        decided = df[~mask_reanalyze].to_dict('records')
+
+        print(f"📋 전체 Pending: {len(df)}건")
+        print(f"   ├─ 재분석 대상 (검토중): {len(to_reanalyze)}건")
+        print(f"   └─ 유지 (적합/거절/보류): {len(decided)}건\n")
+
+        if not to_reanalyze:
+            print("ℹ️  재분석 대상이 없습니다.")
+            return 0
+
+        if limit > 0:
+            to_reanalyze = to_reanalyze[:limit]
+            print(f"⚠️  테스트 모드: {limit}건만 재분석\n")
+
+        # Pending 행을 GeminiAnalyzer가 기대하는 형식으로 변환
+        items = []
+        for row in to_reanalyze:
+            items.append({
+                'title': row.get('title', ''),
+                'link':  row.get('url', ''),
+                'description': '',          # 재크롤링으로 채울 예정
+                'search_keyword': row.get('search_keyword', ''),
+                'search_query':   row.get('search_query', ''),
+                'source':         row.get('source', ''),
+                'organization_hint': row.get('organization', ''),
+            })
+
+        # Step 1: URL 재방문 + 첨부파일(PDF/HWP/HWPX) 텍스트 추출
+        print("🌐 Step 1: URL 재방문 및 첨부파일 추출 중...")
+        scraper = WebScraper()
+        enriched = scraper.enrich_items(items, min_desc_len=0)  # 모두 재크롤링
+        print(f"✅ {enriched}/{len(items)}건 본문 보강 완료\n")
+
+        # Step 2: Gemini 재분석
+        print("🤖 Step 2: Gemini 재분석 중...")
+        analyzer = GeminiAnalyzer()
+        analyzed = analyzer.analyze_batch(items)
+        rejected = analyzer.get_rejected_items()
+        print(f"✅ 적합 {len(analyzed)}건 / 거부 {len(rejected)}건\n")
+
+        # Step 3: 결과를 Pending 포맷으로 변환
+        new_pending_records = ResultProcessor.process_results(analyzed)
+
+        # Step 4: Pending 시트 재작성
+        # decided(이미 결정된) 항목은 그대로 유지, 재분석 결과로 교체
+        print("💾 Step 3: Pending 시트 업데이트 중...")
+        manager.clear_pending()
+
+        # decided 항목 먼저 복원
+        if decided:
+            manager.append_pending_batch(decided)
+
+        # 재분석 결과 저장
+        if new_pending_records:
+            # Archive 대상은 Archive로, 나머지는 Pending에
+            batch_archive = [r for r in new_pending_records if r.get('suggested_target') == 'Archive']
+            batch_pending = [r for r in new_pending_records if r.get('suggested_target') != 'Archive']
+
+            if batch_archive:
+                manager.append_archive_batch(batch_archive)
+                print(f"📦 과거 공고 {len(batch_archive)}건 → Archive 이동")
+            if batch_pending:
+                manager.append_pending_batch(batch_pending)
+
+        print(f"\n{'=' * 60}")
+        print(f"✅ 재분석 완료!")
+        print(f"   - 재분석: {len(to_reanalyze)}건")
+        print(f"   - Gemini 적합: {len(analyzed)}건 (Pending 갱신)")
+        print(f"   - Gemini 거부: {len(rejected)}건 (Pending에서 제거)")
+        print(f"   - 기존 결정 유지: {len(decided)}건")
+        print(f"{'=' * 60}")
+        return 0
+
+    except Exception as e:
+        print(f"\n❌ 재분석 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
 def main():
     """검색 파이프라인 실행"""
     parser = argparse.ArgumentParser()
@@ -25,6 +130,8 @@ def main():
                         help='Pending 시트의 status 컬럼을 읽어 승인/거절 처리만 수행')
     parser.add_argument('--reset', action='store_true',
                         help='모든 데이터 시트 초기화 (Config 제외)')
+    parser.add_argument('--reanalyze', action='store_true',
+                        help='Pending 시트의 검토중 항목을 URL 재방문 + 첨부파일 추출 후 Gemini 재분석')
     args = parser.parse_args()
 
     # 시트 초기화 모드
@@ -54,6 +161,10 @@ def main():
               f"거절 {result['rejected']}건 → Excluded | "
               f"유지 {result['kept']}건")
         return 0
+
+    # Pending 재분석 모드
+    if args.reanalyze:
+        return _reanalyze_pending(limit=args.limit)
 
     print("=" * 60)
     print("AI 노무고문 공고 모니터링 - 자동 검색")
