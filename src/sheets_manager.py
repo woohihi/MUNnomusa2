@@ -8,6 +8,7 @@ from google.oauth2.service_account import Credentials
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import pandas as pd
+import time
 
 from .config import (
     get_config, SHEET_NAMES, CONFIG_COLUMNS, 
@@ -74,6 +75,49 @@ class GoogleSheetManager:
             self._sheet_cache[sheet_key] = self.spreadsheet.worksheet(sheet_name)
         return self._sheet_cache[sheet_key]
     
+    def _with_retry(self, func, *args, max_retries=3, **kwargs):
+        """
+        Google Sheets API 호출 재시도 래퍼
+        429(Quota), 500(Server Error), 503(Service Unavailable) 에러 시
+        Exponential Backoff으로 자동 재시도
+        
+        Args:
+            func: 실행할 함수 (gspread 메서드)
+            *args: 함수 인자
+            max_retries: 최대 재시도 횟수
+            **kwargs: 함수 키워드 인자
+        
+        Returns:
+            함수 실행 결과
+        """
+        last_exception = None
+        for attempt in range(max_retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except gspread.exceptions.APIError as e:
+                last_exception = e
+                status_code = 0
+                # gspread APIError에서 상태 코드 추출
+                if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                    status_code = e.response.status_code
+                elif hasattr(e, 'code'):
+                    status_code = e.code
+                else:
+                    # 에러 메시지에서 추출 시도
+                    error_msg = str(e)
+                    for code in [429, 500, 503]:
+                        if str(code) in error_msg:
+                            status_code = code
+                            break
+                
+                if status_code in (429, 500, 503) and attempt < max_retries:
+                    wait_time = 5 * (2 ** attempt)  # 5초, 10초, 20초
+                    print(f"⏳ Google Sheets API 오류 ({status_code}). {wait_time}초 후 재시도... ({attempt+1}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    raise
+        raise last_exception
+    
     # ===========================
     # Config Sheet 작업
     # ===========================
@@ -91,10 +135,18 @@ class GoogleSheetManager:
             
             # active=True인 기관만 필터링
             active_orgs = [
-                r for r in records 
+                r for r in records
                 if r.get('active') in [True, 'TRUE', 'true', 1, '1']
             ]
-            
+
+            # grade 컬럼 없는 기존 시트와 호환: 없으면 'B' 기본값
+            for org in active_orgs:
+                grade = str(org.get('grade', '')).strip().upper()
+                if grade not in ('A', 'B', 'C'):
+                    org['grade'] = 'B'
+                else:
+                    org['grade'] = grade
+
             print(f"📋 Config Sheet: {len(active_orgs)}개 활성 기관 로드됨")
             return active_orgs
             
@@ -270,8 +322,8 @@ class GoogleSheetManager:
                     cols=10
                 )
             
-            sheet.update('A1:F1', [RESULTS_COLUMNS])
-            sheet.format('A1:F1', {
+            sheet.update('A1:I1', [RESULTS_COLUMNS])
+            sheet.format('A1:I1', {
                 'textFormat': {'bold': True},
                 'backgroundColor': {'red': 0.8, 'green': 0.9, 'blue': 1.0}
             })
@@ -418,7 +470,7 @@ class GoogleSheetManager:
                 [data.get(col, '') for col in ARCHIVE_COLUMNS]
                 for data in data_list
             ]
-            archive_sheet.append_rows(rows)
+            self._with_retry(archive_sheet.append_rows, rows)
             print(f"✅ Archive에 {len(data_list)}건 직접 저장")
             
         except gspread.exceptions.WorksheetNotFound:
@@ -439,8 +491,8 @@ class GoogleSheetManager:
                     cols=12
                 )
             
-            sheet.update('A1:I1', [ARCHIVE_COLUMNS])
-            sheet.format('A1:I1', {
+            sheet.update('A1:L1', [ARCHIVE_COLUMNS])
+            sheet.format('A1:L1', {
                 'textFormat': {'bold': True},
                 'backgroundColor': {'red': 1.0, 'green': 0.9, 'blue': 0.8}
             })
@@ -477,7 +529,11 @@ class GoogleSheetManager:
     
     def append_search_log(self, logs: List[Dict[str, Any]]):
         """
-        검색 로그를 SearchLog Sheet에 추가 (중복 URL 제외)
+        검색 로그를 SearchLog Sheet에 추가 (Append Only)
+        
+        SearchLog는 URL의 라이프사이클을 추적하는 이벤트 로그입니다.
+        동일 URL이 여러 stage(collected → filtered → analyzing → saved)를 거치므로
+        URL 중복 체크 없이 단순 추가합니다.
         
         Args:
             logs: [{'timestamp': '...', 'url': '...', 'title': '...', 
@@ -490,24 +546,15 @@ class GoogleSheetManager:
         try:
             sheet = self.spreadsheet.worksheet(SHEET_NAMES['search_log'])
             
-            # 기존 URL 목록 조회
-            existing_urls = self.get_searchlog_urls()
-            
-            # 중복 URL 제외
-            new_logs = [log for log in logs if log.get('url', '') not in existing_urls]
-            
-            if not new_logs:
-                print(f"📝 SearchLog: 신규 URL 없음 (모두 중복)")
-                return
-            
             rows = [
                 [log.get(col, '') for col in SEARCHLOG_COLUMNS]
-                for log in new_logs
+                for log in logs
             ]
             
-            sheet.append_rows(rows)
+            # 재시도 로직 적용 (429 에러 대응)
+            self._with_retry(sheet.append_rows, rows)
             
-            print(f"📝 SearchLog 추가: {len(new_logs)}건 (중복 제외: {len(logs) - len(new_logs)}건)")
+            print(f"📝 SearchLog 추가: {len(logs)}건")
             
         except gspread.exceptions.WorksheetNotFound:
             self.init_search_log_sheet()
@@ -532,6 +579,64 @@ class GoogleSheetManager:
             print(f"⚠️ SearchLog 로드 실패: {e}")
             return []
     
+    def cleanup_search_log(self, keep_days: int = 30) -> int:
+        """
+        SearchLog에서 오래된 행 삭제 (keep_days일 이전 데이터 제거)
+
+        Args:
+            keep_days: 보존할 일수 (기본 30일)
+
+        Returns:
+            삭제된 행 수
+        """
+        from datetime import datetime, timedelta
+
+        try:
+            sheet = self.spreadsheet.worksheet(SHEET_NAMES['search_log'])
+            all_values = sheet.get_all_values()  # 헤더 포함 전체
+
+            if len(all_values) <= 1:
+                return 0  # 헤더만 있으면 스킵
+
+            header = all_values[0]
+            rows = all_values[1:]
+
+            cutoff = datetime.now() - timedelta(days=keep_days)
+
+            # timestamp 컬럼 인덱스 찾기
+            try:
+                ts_idx = header.index('timestamp')
+            except ValueError:
+                ts_idx = 0  # 첫 번째 컬럼 fallback
+
+            keep_rows = []
+            deleted = 0
+            for row in rows:
+                ts_str = row[ts_idx] if len(row) > ts_idx else ''
+                try:
+                    ts = datetime.strptime(ts_str[:19], '%Y-%m-%d %H:%M:%S')
+                    if ts >= cutoff:
+                        keep_rows.append(row)
+                    else:
+                        deleted += 1
+                except (ValueError, TypeError):
+                    keep_rows.append(row)  # 파싱 실패 시 보존
+
+            if deleted == 0:
+                return 0
+
+            # 시트 재작성 (헤더 + 보존 행)
+            sheet.clear()
+            self._with_retry(sheet.update, 'A1', [header] + keep_rows)
+            print(f"🧹 SearchLog 정리: {deleted}건 삭제 ({keep_days}일 이전), {len(keep_rows)}건 보존")
+            return deleted
+
+        except gspread.exceptions.WorksheetNotFound:
+            return 0
+        except Exception as e:
+            print(f"⚠️ SearchLog 정리 실패 (계속 진행): {e}")
+            return 0
+
     def init_search_log_sheet(self):
         """SearchLog Sheet 초기화 (헤더만)"""
         try:
@@ -695,6 +800,24 @@ class GoogleSheetManager:
             print(f"❌ Excluded Sheet 초기화 실패: {e}")
             raise
     
+    def get_pending_urls(self) -> set:
+        """
+        Pending 시트 URL 조회 (중복 수집 방지용)
+        분할 실행 시 이미 Pending에 있는 항목은 재분석하지 않도록 차단
+
+        Returns:
+            Pending에 저장된 URL들의 set
+        """
+        try:
+            sheet = self.spreadsheet.worksheet(SHEET_NAMES['pending'])
+            records = sheet.get_all_records(expected_headers=PENDING_COLUMNS)
+            urls = {r.get('url', '') for r in records if r.get('url')}
+            return urls
+        except gspread.exceptions.WorksheetNotFound:
+            return set()
+        except Exception:
+            return set()
+
     def get_excluded_urls(self) -> set:
         """
         제외 목록 URL 조회
@@ -779,7 +902,7 @@ class GoogleSheetManager:
             sheet.update('A1', [PENDING_COLUMNS])
             
             # 포맷팅
-            sheet.format('A1:G1', {'textFormat': {'bold': True}, 'horizontalAlignment': 'CENTER'})
+            sheet.format('A1:L1', {'textFormat': {'bold': True}, 'horizontalAlignment': 'CENTER'})
             
             print("✅ Pending Sheet 초기화 완료")
             return sheet
@@ -811,7 +934,7 @@ class GoogleSheetManager:
                 row = [item.get(col, '') for col in PENDING_COLUMNS]
                 rows.append(row)
             
-            sheet.append_rows(rows)
+            self._with_retry(sheet.append_rows, rows)
             print(f"✅ Pending 추가: {len(data_list)}건")
             
         except Exception as e:
@@ -846,7 +969,121 @@ class GoogleSheetManager:
         except Exception as e:
             print(f"❌ Pending 정리 실패: {e}")
 
-    
+    def process_pending_approvals(self) -> Dict[str, int]:
+        """
+        Pending 시트의 status 컬럼을 읽어 자동 분류 처리.
+
+        - '적합' → Results 시트로 이동
+        - '거절' → Excluded 시트에 추가 (재수집 방지)
+        - '보류' / '검토중' / 빈값 → 유지
+
+        Returns:
+            {'approved': N, 'rejected': N, 'kept': N}
+        """
+        from datetime import datetime as dt
+
+        try:
+            df = self.read_pending()
+        except Exception as e:
+            print(f"❌ Pending 읽기 실패: {e}")
+            return {'approved': 0, 'rejected': 0, 'kept': 0}
+
+        if df.empty:
+            print("ℹ️  Pending 시트가 비어있습니다.")
+            return {'approved': 0, 'rejected': 0, 'kept': 0}
+
+        # status 컬럼이 없으면 모두 '검토중' 처리
+        if 'status' not in df.columns:
+            df['status'] = '검토중'
+
+        approved_rows = df[df['status'] == '적합'].to_dict('records')
+        rejected_rows = df[df['status'] == '거절'].to_dict('records')
+        kept_rows = df[~df['status'].isin(['적합', '거절'])].to_dict('records')
+
+        # 적합 → Results 이동
+        if approved_rows:
+            results_data = [
+                {
+                    'url': r.get('url', ''),
+                    'title': r.get('title', ''),
+                    'organization': r.get('organization', ''),
+                    'deadline': r.get('deadline', ''),
+                    'summary': r.get('summary', ''),
+                    'collected_date': r.get('collected_date', dt.now().strftime('%Y-%m-%d')),
+                    'source': r.get('source', ''),
+                    'search_keyword': r.get('search_keyword', ''),
+                    'search_query': r.get('search_query', ''),
+                }
+                for r in approved_rows
+            ]
+            try:
+                self.append_results_batch(results_data)
+                print(f"✅ 적합 {len(approved_rows)}건 → Results 이동 완료")
+            except Exception as e:
+                print(f"❌ Results 이동 실패: {e}")
+
+        # 거절 → Excluded 추가
+        if rejected_rows:
+            excluded_data = [
+                {
+                    'url': r.get('url', ''),
+                    'title': r.get('title', ''),
+                    'reason': '사용자 거절 (Pending 검토)',
+                    'excluded_date': dt.now().strftime('%Y-%m-%d'),
+                }
+                for r in rejected_rows
+            ]
+            try:
+                self.add_to_excluded_batch(excluded_data)
+                print(f"✅ 거절 {len(rejected_rows)}건 → Excluded 추가 완료")
+            except Exception as e:
+                print(f"❌ Excluded 추가 실패: {e}")
+
+        # Pending 시트를 '보류/검토중' 항목만 남기도록 재작성
+        try:
+            sheet = self.get_sheet('pending')
+            sheet.resize(rows=1)  # 헤더만 남기기
+            if kept_rows:
+                rows = [
+                    [r.get(col, '') for col in PENDING_COLUMNS]
+                    for r in kept_rows
+                ]
+                self._with_retry(sheet.append_rows, rows)
+            print(f"🧹 Pending 정리 완료: {len(kept_rows)}건 유지")
+        except Exception as e:
+            print(f"❌ Pending 재작성 실패: {e}")
+
+        return {
+            'approved': len(approved_rows),
+            'rejected': len(rejected_rows),
+            'kept': len(kept_rows),
+        }
+
+    def reset_all_data(self) -> Dict[str, bool]:
+        """
+        모든 데이터 시트를 초기화 (헤더만 남기고 데이터 삭제).
+        Config 시트는 건드리지 않음.
+
+        Returns:
+            {'results': True, 'archive': True, ...} 각 시트 성공 여부
+        """
+        targets = ['results', 'archive', 'pending', 'search_log', 'excluded']
+        result = {}
+        for key in targets:
+            try:
+                sheet = self.spreadsheet.worksheet(SHEET_NAMES[key])
+                sheet.resize(rows=1)  # 헤더(1행)만 남기기
+                self._sheet_cache.pop(key, None)
+                print(f"🧹 {SHEET_NAMES[key]} 초기화 완료")
+                result[key] = True
+            except gspread.exceptions.WorksheetNotFound:
+                print(f"ℹ️  {SHEET_NAMES[key]} 시트 없음 (스킵)")
+                result[key] = True
+            except Exception as e:
+                print(f"❌ {SHEET_NAMES[key]} 초기화 실패: {e}")
+                result[key] = False
+        return result
+
     def move_to_archive(self, urls: List[str]):
         """
         Results에서 Archive로 공고 이동

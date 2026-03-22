@@ -454,33 +454,25 @@ with tab2:
             st.success(f"✅ 검색 완료: {len(search_results)}건 수집")
             logger.info(f"✅ 검색 완료: {len(search_results)}건 수집")
             final_log_update()
-            
-            # SearchLog에 수집된 모든 결과 저장
-            from datetime import datetime
-            search_logs = []
-            for item in search_results:
-                search_logs.append({
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'url': item.get('link', ''),
-                    'title': item.get('title', ''),
-                    'search_keyword': item.get('search_keyword', ''),
-                    'search_query': item.get('search_query', ''),
-                    'source': item.get('source', ''),
-                    'stage': 'collected',
-                    'reason': '수집됨'
-                })
-            
-            if search_logs:
-                manager.append_search_log(search_logs)
-                st.info(f"📝 SearchLog에 {len(search_logs)}건 기록됨")
 
             
             # Step 2: 전처리
             update_log("Step 2/4: 전처리 중 (중복 제거, 키워드 필터링)...")
             progress_bar.progress(50)
             
-            existing_urls = manager.get_result_urls() + manager.get_archive_urls()
-            excluded_urls = list(manager.get_excluded_urls())
+            # URL 목록을 한 번만 조회하여 재사용 (API 호출 최소화)
+            try:
+                existing_urls = manager.get_result_urls() + manager.get_archive_urls()
+            except Exception as e:
+                st.warning(f"⚠️ URL 목록 조회 실패, 빈 목록으로 진행: {e}")
+                existing_urls = []
+            
+            try:
+                excluded_urls = list(manager.get_excluded_urls())
+            except Exception as e:
+                st.warning(f"⚠️ 제외 URL 조회 실패, 빈 목록으로 진행: {e}")
+                excluded_urls = []
+            
             preprocessor = Preprocessor(existing_urls, excluded_urls)
             
             filtered_results = preprocessor.process(search_results)
@@ -536,16 +528,31 @@ with tab2:
             # ----------------------------------------------------------------
             # Pre-Analysis Logging (Data Safety)
             # ----------------------------------------------------------------
-            # 분석 전, 필터링된 항목과 분석 대상(Candidate)을 먼저 로그에 저장하여
+            # 분석 전, 수집/필터링/분석 대상을 한 번에 로그에 저장하여
             # 분석 중 크래시가 발생하더라도 기록이 남도록 함.
+            # API 호출 1회로 통합 (기존 3회 → 1회)
             
             pre_analysis_logs = []
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
-            # 1. 전처리에서 걸러진(Filtered) 항목
+            # 1. 수집된 전체 결과 (collected 단계)
+            for item in search_results:
+                pre_analysis_logs.append({
+                    'timestamp': now_str,
+                    'url': item.get('link', ''),
+                    'title': item.get('title', ''),
+                    'search_keyword': item.get('search_keyword', ''),
+                    'search_query': item.get('search_query', ''),
+                    'source': item.get('source', ''),
+                    'stage': 'collected',
+                    'reason': '수집됨'
+                })
+            
+            # 2. 전처리에서 걸러진(Filtered) 항목
             filtered_items = preprocessor.get_filtered_items()
             for item in filtered_items:
                 pre_analysis_logs.append({
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'timestamp': now_str,
                     'url': item.get('link', ''),
                     'title': item.get('title', ''),
                     'search_keyword': item.get('search_keyword', ''),
@@ -555,10 +562,10 @@ with tab2:
                     'reason': item.get('filter_reason', '전처리 필터링')
                 })
             
-            # 2. 분석 대상(Candidate) 항목 - 'analyzing' 상태로 기록
+            # 3. 분석 대상(Candidate) 항목 - 'analyzing' 상태로 기록
             for item in filtered_results:
                 pre_analysis_logs.append({
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'timestamp': now_str,
                     'url': item.get('link', ''),
                     'title': item.get('title', ''),
                     'search_keyword': item.get('search_keyword', ''),
@@ -569,8 +576,11 @@ with tab2:
                 })
                 
             if pre_analysis_logs:
-                manager.append_search_log(pre_analysis_logs)
-                st.info(f"📝 SearchLog에 분석 대상 및 필터링 결과 {len(pre_analysis_logs)}건 보호 기록됨")
+                try:
+                    manager.append_search_log(pre_analysis_logs)
+                    st.info(f"📝 SearchLog에 {len(pre_analysis_logs)}건 보호 기록 완료 (수집+필터링+분석대기)")
+                except Exception as e:
+                    st.warning(f"⚠️ SearchLog 기록 실패 (검색은 계속 진행): {e}")
 
             # Step 3: Gemini 분석
             update_log(f"Step 3/4: AI 분석 중 ({len(filtered_results)}건)...")
@@ -613,8 +623,11 @@ with tab2:
                 })
             
             if post_analysis_logs:
-                manager.append_search_log(post_analysis_logs)
-                st.info(f"📝 SearchLog에 최종 분석 결과 {len(post_analysis_logs)}건 업데이트됨")
+                try:
+                    manager.append_search_log(post_analysis_logs)
+                    st.info(f"📝 SearchLog에 최종 분석 결과 {len(post_analysis_logs)}건 업데이트됨")
+                except Exception as e:
+                    st.warning(f"⚠️ SearchLog 업데이트 실패 (결과 저장은 계속 진행): {e}")
             
             # 상세 로그 표시
             with st.expander("📊 검색 상세 로그 보기", expanded=False):
@@ -673,36 +686,9 @@ with tab2:
             update_log("Step 4/4: 데이터베이스 업데이트 중...")
             progress_bar.progress(90)
             
-            # 데이터 변환 (마감 여부에 따라 초기 분류)
-            all_records = []  # 모든 공고
-            today = datetime.now().date()
-            
-            for item in analyzed_results:
-                deadline_str = item.get('deadline', '')
-                is_expired = False
-                
-                # 1. is_past_announcement 플래그 확인 (키워드 자동 통과 시 설정됨)
-                if item.get('is_past_announcement', False):
-                    is_expired = True
-                # 2. 마감일 기준 확인
-                elif deadline_str:
-                    try:
-                        deadline = datetime.strptime(deadline_str, '%Y-%m-%d').date()
-                        is_expired = deadline < today
-                    except ValueError:
-                        pass
-                
-                record = {
-                    'url': item.get('url', ''),
-                    'title': item.get('original_title', ''),
-                    'organization': item.get('url', '').split('/')[2] if item.get('url') else 'Unknown',
-                    'deadline': deadline_str,
-                    'summary': item.get('summary', ''),
-                    'collected_date': datetime.now().strftime('%Y-%m-%d'),
-                    # 초기 분류 추천
-                    'suggested_target': 'Archive' if is_expired else 'Results'
-                }
-                all_records.append(record)
+            # 4-1. 데이터 변환 및 분류 (공통 모듈 사용)
+            from src.result_processor import ResultProcessor
+            all_records = ResultProcessor.process_results(analyzed_results)
             
             progress_bar.progress(100)
             update_log("✅ 분석 완료! 아래에서 분류를 확인/수정하고 저장하세요.")

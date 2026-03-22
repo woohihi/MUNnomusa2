@@ -3,13 +3,51 @@ Gemini AI 분석 모듈
 공고 적합성 판별 및 데이터 추출
 """
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from typing import Dict, Any, Optional, List
 import json
+import re
 import time
 from datetime import datetime
 
 from .config import get_config, GEMINI_RATE_LIMIT_DELAY
+
+
+# ===========================
+# 공인노무사 Agent 시스템 인스트럭션
+# ===========================
+_LABOR_EXPERT_INSTRUCTION = """
+당신은 15년 경력의 공인노무사입니다.
+노동법, 인사관리, 노사관계 분야 전문가로서, 공공기관과 기업에서
+노무고문·자문위원 역할을 직접 수행해본 경험이 있습니다.
+
+【당신의 임무】
+주어진 공고가 공인노무사가 수임 가능한 노무 자문 계약인지 판별하고, 필요한 정보를 추출합니다.
+
+【적합 (is_relevant = true) 조건 — 아래 중 하나 이상 해당해야 함】
+- 제목 또는 본문에 다음 중 하나가 명시됨:
+  "노무고문", "고문노무사", "자문노무사", "노무사 위촉", "노무사 선정",
+  "노무 자문", "노무자문", "인사노무 자문", "노사관계 자문", "노무 고문"
+- 위에 해당하지 않더라도, 공공기관이 노동법·인사·노사관계 분야 전문가를
+  위촉 또는 고문 계약으로 선발하는 공고임이 본문에서 명확히 확인되는 경우
+
+【반드시 제외 (is_relevant = false)】
+- "위촉" 단독 사용 (노무 관련 명시 없음) → 감사위원, 환경위원, 문화위원 등 무관
+- "법률고문" 단독 (법무·세무·회계 분야일 수 있음, 노무 명시 없으면 제외)
+- "자문위원" 단독 (분야 불명확) → 노무/노동/인사 관련 명시 없으면 제외
+- 단순 뉴스 기사, 보도자료, 인터뷰
+- 노무법인·법률사무소 자체 홍보, 광고
+- 합격 수기, 면접 후기, 강의 홍보
+- 일반 직원 채용 (사무원, 연구원, 행정직 등)
+- 용역 입찰 (청소, 경비, 시설관리, 건설, IT 등)
+- 본문이 없고 제목에 적합 조건의 명확한 키워드가 없는 경우
+
+【판단 원칙】
+- 마감일이 지난 공고도 적합성 판단 대상 (과거 자료로 보관)
+- **불명확하거나 애매한 경우 → is_relevant = false (확실한 것만 통과)**
+- 본문 없이 제목만 있을 때는 위 【적합 조건】의 키워드가 제목에 직접 있어야만 true
+"""
 
 
 class GeminiAnalyzer:
@@ -23,22 +61,12 @@ class GeminiAnalyzer:
         if not api_key:
             raise ValueError("Gemini API 키가 설정되지 않음. Secrets을 확인하세요.")
         
-        genai.configure(api_key=api_key)
-        
-        # Gemini 2.0 Flash 모델 사용 (1.5 deprecated)
-        # 사용 가능한 모델: gemini-2.0-flash, gemini-2.0-flash-lite, gemini-1.5-flash-latest
-        model_names = ['gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash-latest']
-        
-        for model_name in model_names:
-            try:
-                self.model = genai.GenerativeModel(model_name)
-                print(f"✅ Gemini {model_name} 모델 초기화 완료")
-                break
-            except Exception as e:
-                print(f"⚠️ {model_name} 초기화 실패: {e}")
-                continue
-        else:
-            raise ValueError("사용 가능한 Gemini 모델이 없습니다.")
+        self.client = genai.Client(api_key=api_key)
+
+        # 사용 가능한 모델 우선순위 (API 키에 따라 일부 모델 제한 가능)
+        self._model_names = ['gemini-2.5-flash', 'gemini-2.0-flash']
+        self.model_name = self._model_names[0]
+        print(f"✅ Gemini {self.model_name} 모델 초기화 완료")
     
 
     def analyze(self, item: Dict[str, Any], callback=None) -> Optional[Dict[str, Any]]:
@@ -71,11 +99,30 @@ class GeminiAnalyzer:
 
         for attempt in range(max_retries + 1):
             try:
-                # API 호출
-                response = self.model.generate_content(prompt)
+                # API 호출 (공인노무사 Agent 시스템 인스트럭션 적용)
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=_LABOR_EXPERT_INSTRUCTION,
+                    ),
+                )
+                
+                # Safety 필터링 등으로 응답이 없을 수 있음
+                response_text = None
+                try:
+                    response_text = response.text
+                except (ValueError, AttributeError):
+                    # Safety 필터 등에 의해 텍스트가 없는 경우
+                    print(f"⚠️  Gemini 응답 텍스트 없음 (Safety 필터링 가능)")
+                    return None
+                
+                if not response_text:
+                    print(f"⚠️  Gemini 빈 응답")
+                    return None
                 
                 # JSON 파싱
-                result = self._parse_response(response.text)
+                result = self._parse_response(response_text)
                 
                 # 적합하지 않으면 None 반환
                 if not result or not result.get('is_relevant'):
@@ -120,6 +167,34 @@ class GeminiAnalyzer:
                     # 분석 실패 표시 (상위 호출자에게 알림)
                     return {'critical_error': True, 'msg': 'API Key Blocked'}
                     
+                # 404 Not Found: 모델 사용 불가 → 다음 모델로 교체 후 재시도
+                elif "404" in error_msg or "not found" in error_msg.lower() or "no longer available" in error_msg.lower():
+                    for fb in self._model_names:
+                        if fb != self.model_name:
+                            print(f"⚠️  모델 교체: {self.model_name} → {fb}")
+                            self.model_name = fb
+                            break
+                    else:
+                        print(f"❌ Gemini 분석 실패 (사용 가능한 모델 없음): {e}")
+                        return None
+                    if attempt < max_retries:
+                        continue
+                    return None
+
+                # 네트워크 오류 (인터넷 끊김, DNS 실패, 서버 연결 끊김 등)
+                # → 재시도 대기 후 복구되면 계속, 안 되면 network_error 반환
+                elif any(t in type(e).__name__ for t in ('ConnectError', 'RemoteProtocol', 'TimeoutException', 'ReadTimeout')) \
+                        or "getaddrinfo" in error_msg or "Server disconnected" in error_msg \
+                        or "ConnectionError" in type(e).__name__:
+                    if attempt < max_retries:
+                        wait_time = base_delay * (2 ** attempt)  # 10s, 20s, 40s
+                        print(f"🌐 네트워크 오류. {wait_time}초 대기 후 재시도... ({attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ 네트워크 오류로 분석 실패 (최대 재시도 초과)")
+                        return {'network_error': True}
+
                 else:
                     print(f"❌ Gemini 분석 실패: {e}")
                     return None
@@ -143,16 +218,12 @@ class GeminiAnalyzer:
         
         relevant_items = []
         self.rejected_items = []  # 거부된 항목 추적
-        
-        # 제목에 있으면 무조건 통과시키는 핵심 키워드
-        must_pass_keywords = [
-            '노무법인', '노무고문', '노무자문', '고문노무사', '자문노무사',
-            '노무사위촉', '노무사선정', '노무사모집', '인사노무'
-        ]
-        
+        consecutive_network_errors = 0  # 연속 네트워크 오류 카운터
+        MAX_CONSECUTIVE_NETWORK_ERRORS = 5  # 이 이상이면 인터넷 끊긴 것으로 판단, 중단
+
         # 현재 연도
         current_year = datetime.now().year
-        
+
         for idx, item in enumerate(items, start=1):
             if callback:
                 callback(f"🤖 분석 중... ({idx}/{len(items)}): {item.get('title', '')[:30]}...")
@@ -164,45 +235,79 @@ class GeminiAnalyzer:
             # 띄어쓰기 제거한 버전 (노무 고문 → 노무고문)
             title_no_space = title_lower.replace(' ', '')
             
-            # 제목에 핵심 키워드가 있으면 Gemini 분석 없이 바로 통과
-            if any(kw in title_no_space for kw in must_pass_keywords):
-                # 제목에서 연도 추출 (4자리 또는 2자리)
-                import re
+            # [Quick Reject 1] 과거 연도 필터링
+            # 사용자 요청: "2025년, 2025, 25년" 등 지난 연도 공고 제거 (현재 2026년 기준)
+            # 단, '평가', '성과', '결산' 등은 작년 실적을 올해 평가하는 경우일 수 있으므로 제외
+            
+            found_year = None
+            
+            # 4자리 연도 (20XX)
+            match_4 = re.search(r'(20\d{2})', title)
+            if match_4:
+                found_year = int(match_4.group(1))
+            else:
+                # 2자리 연도 ('XX년, XX년도)
+                match_2 = re.search(r"['\s]?(\d{2})년", title)
+                if match_2:
+                    y2 = int(match_2.group(1))
+                    # 2000년대 가정
+                    found_year = 2000 + y2
+            
+            # 과거 연도이고, 예외 키워드가 없으면 거부
+            safe_past_keywords = ['평가', '성과', '결산', '실적', '감사']
+            
+            if found_year and found_year < current_year:
+                # 예외 키워드 확인
+                is_safe = any(sk in title_lower for sk in safe_past_keywords)
                 
-                posting_year = None
-                
-                # 1. 4자리 연도 먼저 시도 (예: "2026년", "2025년도")
-                year_match_4 = re.search(r'(20\d{2})년', title)
-                if year_match_4:
-                    posting_year = int(year_match_4.group(1))
-                else:
-                    # 2. 2자리 연도 시도 (예: "'23년", "23년도", "24년")
-                    year_match_2 = re.search(r"['\"]?(\d{2})년", title)
-                    if year_match_2:
-                        short_year = int(year_match_2.group(1))
-                        # 20XX로 변환 (21~29 → 2021~2029, 00~20 → 2000~2020)
-                        posting_year = 2000 + short_year
-                
-                is_past = False
-                if posting_year:
-                    is_past = posting_year < current_year
-                
-                result = {
-                    'is_relevant': True,
+                if not is_safe:
+                    # [변경] 예전엔 그냥 Skip 했으나, 사용자가 Archive 저장을 원할 수 있음
+                    # 따라서 relevant=True로 하되, is_past_announcement=True 설정하여
+                    # 나중에 Pending 시트 저장 시 'Archive'로 분류되게 함.
+                    
+                    result = {
+                        'is_relevant': True,
+                        'url': item.get('link', ''),
+                        'original_title': title,
+                        'summary': f"📉 과거 공고 자동 분류 ({found_year}년)",
+                        'deadline': f"{found_year}-12-31",  # 편의상 연말
+                        'term_months': None,
+                        'start_date': None,
+                        'is_past_announcement': True,  # 핵심 플래그
+                        'search_keyword': item.get('search_keyword', ''),
+                        'search_query': item.get('search_query', ''),
+                        'source': item.get('source', '')
+                    }
+                    relevant_items.append(result)
+                    
+                    if callback:
+                        callback(f"📉 과거 공고 Archive 분류: {found_year}년")
+                    continue
+            
+            # [Quick Reject] 제목 기반 즉시 거부 (API 절약)
+            # 노무사가 갈 수 없는 명확한 키워드가 제목에 있으면 Skip
+            # 예: '경비원', '미화원', '운전원', '조리원', '시설관리', '사무원', '간호사' 등
+            quick_reject_keywords = [
+                '경비원', '미화원', '환경미화', '운전원', '조리원', '영양사', '간호사',
+                '시설관리', '시설거주', '요양보호사', '사회복지사', '물리치료사',
+                '기간제근로자', '공무직', '사무원', '행정원', '연구원', '상담원',
+                '대학생', '청년인턴', '체험형', '아르바이트', '단기알바',
+                '용역', '입찰', '구매', '공사', '설계', '감리'
+            ]
+            
+            if any(rj in title_no_space for rj in quick_reject_keywords):
+                self.rejected_items.append({
                     'url': item.get('link', ''),
-                    'original_title': title,
-                    'summary': f"⚡ 키워드 매칭 자동 통과 ({posting_year if posting_year else '연도 미상'}년)",
-                    'deadline': f"{posting_year}-12-31" if posting_year and is_past else None,  # 과거 공고는 해당 연도 말로 설정
-                    'term_months': None,
-                    'start_date': None,
-                    'is_past_announcement': is_past,  # 과거 공고 여부 표시
-                    # 원본 데이터 유지
+                    'title': item.get('title', ''),
+                    'rejection_reason': '⚡ Quick Reject: 제목 내 제외 키워드 포함',
                     'search_keyword': item.get('search_keyword', ''),
                     'search_query': item.get('search_query', ''),
                     'source': item.get('source', '')
-                }
-                relevant_items.append(result)
+                })
+                if callback:
+                    callback(f"⚡ Quick Reject: {title[:20]}...")
                 continue
+
             
             # 그 외는 Gemini 분석
             result = self.analyze(item, callback=callback)
@@ -231,15 +336,28 @@ class GeminiAnalyzer:
                     relevant_items.append(skipped_result)
                 
                 break  # 반복 종료
-            
-            if result:
-                # 원본 데이터 추가
+
+            # 네트워크 오류 → 연속 횟수 카운트, 임계치 초과 시 중단
+            elif result and result.get('network_error'):
+                consecutive_network_errors += 1
+                print(f"🌐 네트워크 오류 누적: {consecutive_network_errors}/{MAX_CONSECUTIVE_NETWORK_ERRORS}")
+                relevant_items.append(self._make_failed_result(item))
+
+                if consecutive_network_errors >= MAX_CONSECUTIVE_NETWORK_ERRORS:
+                    print(f"\n❌ 네트워크 연결 불가 판단 → 남은 {len(items) - idx}건 분석 실패 처리 후 저장")
+                    for rem_item in items[idx:]:
+                        relevant_items.append(self._make_failed_result(rem_item))
+                    break
+
+            elif result:
+                consecutive_network_errors = 0  # 성공 시 카운터 리셋
                 result['search_keyword'] = item.get('search_keyword', '')
                 result['search_query'] = item.get('search_query', '')
                 result['source'] = item.get('source', '')
                 relevant_items.append(result)
             else:
-                # 거부 사유 저장 (원본 데이터 포함)
+                consecutive_network_errors = 0
+                # AI가 거부한 항목
                 self.rejected_items.append({
                     'url': item.get('link', ''),
                     'title': item.get('title', ''),
@@ -248,10 +366,11 @@ class GeminiAnalyzer:
                     'search_query': item.get('search_query', ''),
                     'source': item.get('source', '')
                 })
-        
+
         print()  # 줄바꿈
         print("-" * 50)
-        print(f"✅ Gemini 분석 완료: {len(relevant_items)}건 적합 ({len(items) - len(relevant_items)}건 제외)")
+        failed = sum(1 for r in relevant_items if '[분석 실패]' in r.get('summary', ''))
+        print(f"✅ Gemini 분석 완료: {len(relevant_items) - failed}건 적합, {failed}건 분석실패, {len(self.rejected_items)}건 AI거부")
         
         return relevant_items
     
@@ -287,13 +406,14 @@ class GeminiAnalyzer:
         if is_empty_body:
             empty_warning = """
 ⚠️ 주의: 본문이 비어있거나 "붙임 참조" 등으로만 구성되어 있습니다.
-이 경우 제목에 [노무, 고문, 자문, 위촉, 법률] 키워드가 명확하다면 무조건 is_relevant=true로 판정하고,
-summary에 "⚠️ 첨부파일 확인 필요" 문구를 추가하세요.
+이 경우 제목에 ["노무고문", "고문노무사", "자문노무사", "노무사 위촉", "노무자문"] 중 하나가
+명확히 포함된 경우에만 is_relevant=true로 판정하세요.
+단순 "위촉", "고문", "자문위원" 만으로는 부족합니다. 노무/노동 분야임이 제목에서 확인돼야 합니다.
+is_relevant=true인 경우 summary에 "⚠️ 첨부파일 확인 필요" 문구를 추가하세요.
 """
         
         prompt = f"""
-당신은 공인노무사 채용 공고 분석 전문가입니다.
-아래 공고가 공인노무사가 지원할 수 있는 직무인지 판별하고, 필요한 정보를 추출하세요.
+아래 공고를 분석하여 공인노무사 지원 가능 여부를 판별하고, 필요한 정보를 추출하세요.
 
 오늘 날짜: {today}
 
@@ -316,20 +436,20 @@ summary에 "⚠️ 첨부파일 확인 필요" 문구를 추가하세요.
 
 <판정 규칙>
 1. **적합성 (is_relevant)**:
-   - 공인노무사가 지원 가능한 직무인가? (노무고문, 노무자문, 법률자문, 인사위원, 평가위원, 노무사 위촉 등)
-   - 제목이나 본문에 [노무사, 노무고문, 노무자문, 위촉, 법률고문, 인사노무] 키워드가 있으면 true
-   - 본문이 없어도 제목에 관련 키워드가 있으면 true
-   - 마감일 정보가 없거나 불명확해도 관련 공고면 true (마감일은 별도 확인 가능)
-   - **중요: 마감일이 이미 지났더라도 노무 관련 공고면 무조건 is_relevant=true로 판정**
-   - **과거 공고도 '과거 자료'로 Archive에 기록되므로 마감 여부와 관계없이 적합성만 판단**
+   - 노무고문·고문노무사·자문노무사·노무사 위촉·노무자문 등 **노무사가 직접 계약 주체가 되는 공고**인가?
+   - 제목 또는 본문에 ["노무고문", "고문노무사", "자문노무사", "노무사 위촉", "노무자문", "노무 자문"] 중 하나가 명시돼야 true
+   - "위촉" 단독, "법률고문" 단독, "자문위원" 단독은 노무 분야 명시 없으면 false
+   - 본문이 없을 때는 위 키워드가 제목에 직접 있어야만 true (제목이 모호하면 false)
+   - 마감일이 지난 공고도 위 조건 충족 시 true (과거 자료로 보관)
+   - **불명확하거나 애매한 경우 → false**
    - **제외 대상 (is_relevant=false)**:
-     - 단순 뉴스 기사, 보도자료, 인터뷰 (채용 공고가 아님)
-     - 노무법인/법률사무소의 자체 홍보글, 광고, 블로그 마케팅
+     - 단순 뉴스 기사, 보도자료, 인터뷰
+     - 노무법인/법률사무소의 자체 홍보글, 광고
      - "합격 자기소개서", "면접 후기", "취업 팁", "강의 홍보"
-     - 특정 사건 수임 홍보 ("XX사건 승소 사례" 등)
+     - 특정 사건 수임 홍보
      - 단순 용역 입찰 (청소, 경비, 시설관리 등)
-     - 노무사가 아닌 일반 직원(사무직, 경리 등) 채용 공고
-   - 단, 명백히 관련 없는 공고 (채용 아닌 일반 뉴스, 상품 광고 등)만 false
+     - 일반 직원(사무직, 경리, 연구원 등) 채용 공고
+     - 감사위원, 환경위원, 문화위원 등 노무 무관 위원 위촉
 
 2. **요약 (summary)**:
    - 공고의 핵심 내용을 1-2문장으로 간결하게 요약
@@ -377,10 +497,69 @@ summary에 "⚠️ 첨부파일 확인 필요" 문구를 추가하세요.
             return True
         
         return False
-    
+
+    def _make_failed_result(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """네트워크/API 오류로 분석 실패한 항목을 '분석실패' 상태로 저장용 딕셔너리 생성"""
+        return {
+            'is_relevant': True,
+            'url': item.get('link', ''),
+            'original_title': item.get('title', ''),
+            'summary': '⚠️ [분석 실패] 네트워크 오류 또는 API 차단으로 분석 불가 — 재실행 시 자동 처리',
+            'deadline': None,
+            'term_months': None,
+            'start_date': None,
+            'is_past_announcement': False,
+            'search_keyword': item.get('search_keyword', ''),
+            'search_query': item.get('search_query', ''),
+            'source': item.get('source', ''),
+        }
+
+    def _extract_deadline_from_text(self, text: str):
+        """
+        텍스트(description/본문)에서 마감일 패턴 추출.
+        키워드 자동통과 항목의 과거 공고 감지에 사용.
+
+        Returns:
+            (deadline_str: 'YYYY-MM-DD' or None, is_past: bool)
+        """
+        from datetime import date as _date
+
+        today = _date.today()
+        candidates = []
+
+        # 패턴 1: YYYY-MM-DD 또는 YYYY.MM.DD 또는 YYYY/MM/DD
+        for m in re.finditer(r'(20\d{2})[-./](\d{1,2})[-./](\d{1,2})', text):
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                candidates.append(_date(y, mo, d))
+            except ValueError:
+                pass
+
+        # 패턴 2: YYYY년 MM월 DD일
+        for m in re.finditer(r'(20\d{2})년\s*(\d{1,2})월\s*(\d{1,2})일', text):
+            y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            try:
+                candidates.append(_date(y, mo, d))
+            except ValueError:
+                pass
+
+        if not candidates:
+            return None, False
+
+        # 가장 최근 날짜를 마감일로 채택 (공고 본문에는 여러 날짜가 섞일 수 있음)
+        # 단, 미래 날짜 > 과거 날짜 우선 (마감일은 보통 가장 나중 날짜)
+        future = [d for d in candidates if d >= today]
+        if future:
+            chosen = min(future)  # 가장 가까운 미래 날짜
+            return chosen.strftime('%Y-%m-%d'), False
+
+        # 모두 과거이면 가장 최근 과거 날짜
+        chosen = max(candidates)
+        return chosen.strftime('%Y-%m-%d'), True
+
     def _parse_response(self, response_text: str) -> Optional[Dict[str, Any]]:
         """
-        Gemini 응답 JSON 파싱
+        Gemini 응답 JSON 파싱 (다양한 응답 형태 대응)
         
         Args:
             response_text: Gemini 응답 텍스트
@@ -388,14 +567,29 @@ summary에 "⚠️ 첨부파일 확인 필요" 문구를 추가하세요.
         Returns:
             파싱된 딕셔너리 또는 None
         """
+        if not response_text or not response_text.strip():
+            print("⚠️  Gemini 응답이 비어있음 (Safety 필터링 가능)")
+            return None
+        
         try:
-            # 코드 블록 제거 (```json ... ```)
+            # 코드 블록 제거 (```json ... ``` 또는 ``` ... ```)
             cleaned = response_text.strip()
             
             if cleaned.startswith('```'):
                 # ```json\n{...}\n``` 형태
                 lines = cleaned.split('\n')
-                cleaned = '\n'.join(lines[1:-1])
+                # 첫 줄(```json)과 마지막 줄(```) 제거
+                start_idx = 1
+                end_idx = len(lines) - 1
+                if end_idx > start_idx:
+                    cleaned = '\n'.join(lines[start_idx:end_idx])
+                else:
+                    cleaned = '\n'.join(lines[start_idx:])
+            
+            # JSON 객체 추출 시도 ({...} 범위 찾기)
+            json_match = re.search(r'\{[\s\S]*\}', cleaned)
+            if json_match:
+                cleaned = json_match.group(0)
             
             # JSON 파싱
             data = json.loads(cleaned)
