@@ -1,0 +1,54 @@
+name: 노무고문 공고 자동 검색
+
+on:
+  schedule:
+    # 매주 월요일 오전 9시 (KST) = UTC 00:00
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Gemini 분석 건수 제한 (0=무제한)'
+        required: false
+        default: '0'
+      orgs:
+        description: '검색할 기관 수 제한 (0=무제한)'
+        required: false
+        default: '0'
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 검색 파이프라인 실행
+        env:
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+          GOOGLE_SHEETS_CREDS: ${{ secrets.GOOGLE_SHEETS_CREDS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: |
+          LIMIT=${{ github.event.inputs.limit || '0' }}
+          ORGS=${{ github.event.inputs.orgs || '0' }}
+          ARGS=""
+          if [ "$LIMIT" != "0" ]; then ARGS="$ARGS --limit $LIMIT"; fi
+          if [ "$ORGS"  != "0" ]; then ARGS="$ARGS --orgs $ORGS";   fi
+          python -m src.main $ARGS
