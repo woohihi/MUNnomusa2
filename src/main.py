@@ -39,7 +39,11 @@ def _reanalyze_pending(limit: int = 0) -> int:
 
         # '검토중' 상태만 재분석 (이미 결정된 항목은 제외)
         decided_statuses = {'적합', '거절', '보류'}
-        mask_reanalyze = ~df.get('status', '').isin(decided_statuses)
+        status_col = df['status'] if 'status' in df.columns else df.get('status', '')
+        if not hasattr(status_col, 'isin'):
+            import pandas as pd
+            status_col = pd.Series(['검토중'] * len(df))
+        mask_reanalyze = ~status_col.isin(decided_statuses)
         to_reanalyze = df[mask_reanalyze].to_dict('records')
         decided = df[~mask_reanalyze].to_dict('records')
 
@@ -69,9 +73,17 @@ def _reanalyze_pending(limit: int = 0) -> int:
             })
 
         # Step 1: URL 재방문 + 첨부파일(PDF/HWP/HWPX) 텍스트 추출
+        # enrich_items는 description이 짧을 때만 크롤링하므로, 재분석에선 직접 fetch
         print("🌐 Step 1: URL 재방문 및 첨부파일 추출 중...")
         scraper = WebScraper()
-        enriched = scraper.enrich_items(items, min_desc_len=0)  # 모두 재크롤링
+        enriched = 0
+        for i, item in enumerate(items, 1):
+            url = item.get('link', '')
+            print(f"  [{i}/{len(items)}] {url[:70]}")
+            text = scraper.fetch(url)
+            if text:
+                item['description'] = text
+                enriched += 1
         print(f"✅ {enriched}/{len(items)}건 본문 보강 완료\n")
 
         # Step 2: Gemini 재분석
@@ -88,6 +100,7 @@ def _reanalyze_pending(limit: int = 0) -> int:
         # decided(이미 결정된) 항목은 그대로 유지, 재분석 결과로 교체
         print("💾 Step 3: Pending 시트 업데이트 중...")
         manager.clear_pending()
+        manager.init_pending_sheet()  # 헤더 정리 (중복 컬럼 제거)
 
         # decided 항목 먼저 복원
         if decided:

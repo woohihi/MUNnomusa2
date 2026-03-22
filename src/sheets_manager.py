@@ -3,12 +3,24 @@ Google Sheets 관리 모듈
 CRUD 작업 및 데이터 영속성 담당
 """
 
+import sys
 import gspread
 from google.oauth2.service_account import Credentials
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import pandas as pd
 import time
+
+
+def _log(msg: str) -> None:
+    """stdout이 닫혀 있어도 안전하게 로그 출력 (Streamlit rerun 대비)."""
+    try:
+        print(msg)
+    except (ValueError, OSError):
+        try:
+            sys.stderr.write(msg + '\n')
+        except Exception:
+            pass
 
 from .config import (
     get_config, SHEET_NAMES, CONFIG_COLUMNS, 
@@ -57,7 +69,7 @@ class GoogleSheetManager:
             print(f"✅ Google Sheets 연결 성공: {self.spreadsheet.title}")
             
         except Exception as e:
-            print(f"❌ Google Sheets 인증 실패: {e}")
+            _log(f"❌ Google Sheets 인증 실패: {e}")
             raise
     
     def get_sheet(self, sheet_key: str):
@@ -154,7 +166,7 @@ class GoogleSheetManager:
             print("⚠️  Config Sheet 없음. 초기화 필요")
             return []
         except Exception as e:
-            print(f"❌ Config 읽기 실패: {e}")
+            _log(f"❌ Config 읽기 실패: {e}")
             return []
     
     def init_config_sheet(self):
@@ -193,7 +205,7 @@ class GoogleSheetManager:
             print(f"✅ Config Sheet 초기화 완료 ({len(data_rows)}개 기관)")
             
         except Exception as e:
-            print(f"❌ Config Sheet 초기화 실패: {e}")
+            _log(f"❌ Config Sheet 초기화 실패: {e}")
             raise
     
     def add_config_row(self, org_data: Dict[str, Any]):
@@ -216,7 +228,7 @@ class GoogleSheetManager:
             print(f"✅ Config 추가: {org_data.get('organization')}")
             
         except Exception as e:
-            print(f"❌ Config 추가 실패: {e}")
+            _log(f"❌ Config 추가 실패: {e}")
             raise
     
     # ===========================
@@ -246,7 +258,7 @@ class GoogleSheetManager:
             print("⚠️  Results Sheet 없음. 초기화 필요")
             return pd.DataFrame(columns=RESULTS_COLUMNS)
         except Exception as e:
-            print(f"❌ Results 읽기 실패: {e}")
+            _log(f"❌ Results 읽기 실패: {e}")
             return pd.DataFrame(columns=RESULTS_COLUMNS)
     
     def get_result_urls(self) -> List[str]:
@@ -280,7 +292,7 @@ class GoogleSheetManager:
             self.init_results_sheet()
             self.append_result(data)  # 재귀 호출
         except Exception as e:
-            print(f"❌ Results 추가 실패: {e}")
+            _log(f"❌ Results 추가 실패: {e}")
     
     def append_results_batch(self, data_list: List[Dict[str, Any]]):
         """
@@ -308,7 +320,7 @@ class GoogleSheetManager:
             self.init_results_sheet()
             self.append_results_batch(data_list)
         except Exception as e:
-            print(f"❌ Results 배치 추가 실패: {e}")
+            _log(f"❌ Results 배치 추가 실패: {e}")
     
     def init_results_sheet(self):
         """Results Sheet 초기화 (헤더만)"""
@@ -331,7 +343,7 @@ class GoogleSheetManager:
             print("✅ Results Sheet 초기화 완료")
             
         except Exception as e:
-            print(f"❌ Results Sheet 초기화 실패: {e}")
+            _log(f"❌ Results Sheet 초기화 실패: {e}")
             raise
     
     # ===========================
@@ -360,7 +372,7 @@ class GoogleSheetManager:
             print("⚠️  Archive Sheet 없음. 초기화 필요")
             return pd.DataFrame(columns=ARCHIVE_COLUMNS)
         except Exception as e:
-            print(f"❌ Archive 읽기 실패: {e}")
+            _log(f"❌ Archive 읽기 실패: {e}")
             return pd.DataFrame(columns=ARCHIVE_COLUMNS)
     
     def get_archive_urls(self) -> List[str]:
@@ -452,7 +464,7 @@ class GoogleSheetManager:
             self.init_archive_sheet()
             self.archive_expired()
         except Exception as e:
-            print(f"❌ 아카이빙 실패: {e}")
+            _log(f"❌ 아카이빙 실패: {e}")
     
     def append_archive_batch(self, data_list: List[Dict[str, Any]]):
         """
@@ -477,7 +489,8 @@ class GoogleSheetManager:
             self.init_archive_sheet()
             self.append_archive_batch(data_list)
         except Exception as e:
-            print(f"❌ Archive 배치 추가 실패: {e}")
+            _log(f"❌ Archive 배치 추가 실패: {e}")
+            raise
     
     def init_archive_sheet(self):
         """Archive Sheet 초기화 (헤더만)"""
@@ -500,7 +513,7 @@ class GoogleSheetManager:
             print("✅ Archive Sheet 초기화 완료")
             
         except Exception as e:
-            print(f"❌ Archive Sheet 초기화 실패: {e}")
+            _log(f"❌ Archive Sheet 초기화 실패: {e}")
             raise
     
     # ===========================
@@ -524,7 +537,7 @@ class GoogleSheetManager:
         except gspread.exceptions.WorksheetNotFound:
             return set()
         except Exception as e:
-            print(f"⚠️ SearchLog URL 조회 실패: {e}")
+            _log(f"⚠️ SearchLog URL 조회 실패: {e}")
             return set()
     
     def append_search_log(self, logs: List[Dict[str, Any]]):
@@ -560,7 +573,7 @@ class GoogleSheetManager:
             self.init_search_log_sheet()
             self.append_search_log(logs)
         except Exception as e:
-            print(f"❌ SearchLog 추가 실패: {e}")
+            _log(f"❌ SearchLog 추가 실패: {e}")
     
     def read_search_log(self) -> List[Dict[str, Any]]:
         """
@@ -576,7 +589,7 @@ class GoogleSheetManager:
         except gspread.exceptions.WorksheetNotFound:
             return []
         except Exception as e:
-            print(f"⚠️ SearchLog 로드 실패: {e}")
+            _log(f"⚠️ SearchLog 로드 실패: {e}")
             return []
     
     def cleanup_search_log(self, keep_days: int = 30) -> int:
@@ -634,7 +647,7 @@ class GoogleSheetManager:
         except gspread.exceptions.WorksheetNotFound:
             return 0
         except Exception as e:
-            print(f"⚠️ SearchLog 정리 실패 (계속 진행): {e}")
+            _log(f"⚠️ SearchLog 정리 실패 (계속 진행): {e}")
             return 0
 
     def init_search_log_sheet(self):
@@ -658,7 +671,7 @@ class GoogleSheetManager:
             print("✅ SearchLog Sheet 초기화 완료")
             
         except Exception as e:
-            print(f"❌ SearchLog Sheet 초기화 실패: {e}")
+            _log(f"❌ SearchLog Sheet 초기화 실패: {e}")
             raise
     
     # ===========================
@@ -689,7 +702,7 @@ class GoogleSheetManager:
             print("⚠️ Keywords Sheet 없음. 기본값 사용")
             return DEFAULT_JOB_KEYWORDS
         except Exception as e:
-            print(f"❌ Keywords 읽기 실패: {e}")
+            _log(f"❌ Keywords 읽기 실패: {e}")
             return DEFAULT_JOB_KEYWORDS
     
     def add_keyword(self, keyword: str, active: bool = True):
@@ -709,7 +722,7 @@ class GoogleSheetManager:
             self.init_keywords_sheet()
             self.add_keyword(keyword, active)
         except Exception as e:
-            print(f"❌ 키워드 추가 실패: {e}")
+            _log(f"❌ 키워드 추가 실패: {e}")
             raise
     
     def init_keywords_sheet(self):
@@ -740,7 +753,7 @@ class GoogleSheetManager:
             print(f"✅ Keywords Sheet 초기화 완료 ({len(data_rows)}개 키워드)")
             
         except Exception as e:
-            print(f"❌ Keywords Sheet 초기화 실패: {e}")
+            _log(f"❌ Keywords Sheet 초기화 실패: {e}")
             raise
     
     # ===========================
@@ -768,7 +781,7 @@ class GoogleSheetManager:
             print(f"✅ 연결 성공: {title}")
             return True
         except Exception as e:
-            print(f"❌ 연결 실패: {e}")
+            _log(f"❌ 연결 실패: {e}")
             return False
     
     # ===========================
@@ -797,7 +810,7 @@ class GoogleSheetManager:
             print("✅ Excluded Sheet 초기화 완료")
             
         except Exception as e:
-            print(f"❌ Excluded Sheet 초기화 실패: {e}")
+            _log(f"❌ Excluded Sheet 초기화 실패: {e}")
             raise
     
     def get_pending_urls(self) -> set:
@@ -835,7 +848,7 @@ class GoogleSheetManager:
         except gspread.exceptions.WorksheetNotFound:
             return set()
         except Exception as e:
-            print(f"⚠️ Excluded URL 조회 실패: {e}")
+            _log(f"⚠️ Excluded URL 조회 실패: {e}")
             return set()
     
     def add_to_excluded(self, url: str, title: str, reason: str = "수동 제외"):
@@ -877,7 +890,7 @@ class GoogleSheetManager:
             print(f"✅ 제외 목록 추가: {len(items)}건")
             
         except Exception as e:
-            print(f"❌ 제외 목록 추가 실패: {e}")
+            _log(f"❌ 제외 목록 추가 실패: {e}")
             raise
     
     # ===========================
@@ -908,7 +921,7 @@ class GoogleSheetManager:
             return sheet
             
         except Exception as e:
-            print(f"❌ Pending Sheet 초기화 실패: {e}")
+            _log(f"❌ Pending Sheet 초기화 실패: {e}")
             raise
 
     def append_pending_batch(self, data_list: List[Dict[str, Any]]):
@@ -938,24 +951,31 @@ class GoogleSheetManager:
             print(f"✅ Pending 추가: {len(data_list)}건")
             
         except Exception as e:
-            print(f"❌ Pending 추가 실패: {e}")
+            _log(f"❌ Pending 추가 실패: {e}")
             raise
 
     def read_pending(self) -> pd.DataFrame:
         """
         Pending Sheet에서 검토 대기 공고 로드
-        
+
         Returns:
             DataFrame
         """
         try:
             sheet = self.get_sheet('pending')
-            records = sheet.get_all_records()
-            return pd.DataFrame(records)
+            all_values = sheet.get_all_values()
+            if not all_values or len(all_values) < 2:
+                return pd.DataFrame(columns=PENDING_COLUMNS)
+            headers = all_values[0]
+            rows = all_values[1:]
+            df = pd.DataFrame(rows, columns=headers)
+            # 빈 행 제거
+            df = df[df['url'].str.strip() != ''] if 'url' in df.columns else df
+            return df
         except gspread.exceptions.WorksheetNotFound:
             return pd.DataFrame(columns=PENDING_COLUMNS)
         except Exception as e:
-            print(f"⚠️ Pending 로드 실패: {e}")
+            _log(f"⚠️ Pending 로드 실패: {e}")
             return pd.DataFrame(columns=PENDING_COLUMNS)
 
     def clear_pending(self):
@@ -967,7 +987,7 @@ class GoogleSheetManager:
             sheet.resize(rows=100) # 다시 적당한 크기로
             print("🧹 Pending Sheet 정리 완료")
         except Exception as e:
-            print(f"❌ Pending 정리 실패: {e}")
+            _log(f"❌ Pending 정리 실패: {e}")
 
     def process_pending_approvals(self) -> Dict[str, int]:
         """
@@ -985,7 +1005,7 @@ class GoogleSheetManager:
         try:
             df = self.read_pending()
         except Exception as e:
-            print(f"❌ Pending 읽기 실패: {e}")
+            _log(f"❌ Pending 읽기 실패: {e}")
             return {'approved': 0, 'rejected': 0, 'kept': 0}
 
         if df.empty:
@@ -1020,7 +1040,7 @@ class GoogleSheetManager:
                 self.append_results_batch(results_data)
                 print(f"✅ 적합 {len(approved_rows)}건 → Results 이동 완료")
             except Exception as e:
-                print(f"❌ Results 이동 실패: {e}")
+                _log(f"❌ Results 이동 실패: {e}")
 
         # 거절 → Excluded 추가
         if rejected_rows:
@@ -1037,7 +1057,7 @@ class GoogleSheetManager:
                 self.add_to_excluded_batch(excluded_data)
                 print(f"✅ 거절 {len(rejected_rows)}건 → Excluded 추가 완료")
             except Exception as e:
-                print(f"❌ Excluded 추가 실패: {e}")
+                _log(f"❌ Excluded 추가 실패: {e}")
 
         # Pending 시트를 '보류/검토중' 항목만 남기도록 재작성
         try:
@@ -1051,7 +1071,7 @@ class GoogleSheetManager:
                 self._with_retry(sheet.append_rows, rows)
             print(f"🧹 Pending 정리 완료: {len(kept_rows)}건 유지")
         except Exception as e:
-            print(f"❌ Pending 재작성 실패: {e}")
+            _log(f"❌ Pending 재작성 실패: {e}")
 
         return {
             'approved': len(approved_rows),
@@ -1080,7 +1100,7 @@ class GoogleSheetManager:
                 print(f"ℹ️  {SHEET_NAMES[key]} 시트 없음 (스킵)")
                 result[key] = True
             except Exception as e:
-                print(f"❌ {SHEET_NAMES[key]} 초기화 실패: {e}")
+                _log(f"❌ {SHEET_NAMES[key]} 초기화 실패: {e}")
                 result[key] = False
         return result
 
@@ -1154,7 +1174,7 @@ class GoogleSheetManager:
             print(f"✅ Archive로 이동: {len(rows_to_move)}건")
             
         except Exception as e:
-            print(f"❌ Archive 이동 실패: {e}")
+            _log(f"❌ Archive 이동 실패: {e}")
             raise
     
     def move_to_excluded(self, urls: List[str], source: str = 'results', reason: str = "수동 제외"):
@@ -1213,7 +1233,7 @@ class GoogleSheetManager:
             print(f"✅ 제외 목록으로 이동: {len(rows_to_delete)}건")
             
         except Exception as e:
-            print(f"❌ 제외 목록 이동 실패: {e}")
+            _log(f"❌ 제외 목록 이동 실패: {e}")
             raise
 
 
